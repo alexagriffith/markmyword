@@ -1,6 +1,0 @@
-{
-  "groups": [
-    ".intro"
-  ],
-  "_comment": "groups: CSS selectors whose matched elements are edited as ONE section (data-hs-group applied at load). Kept here, not in the HTML, so formatters can't strip the marker. The selector below targets the INTRO block so its three paragraphs are anchored/edited together."
-}

@@ -1,13 +1,22 @@
-// Grouped-block (data-hs-group) anchoring + serialization tests, using the
-// synthetic example doc (INTRO card is marked data-hs-group) via jsdom.
-import { readFileSync } from 'node:fs';
+// Grouped-block (data-hs-group) anchoring + serialization tests. Uses a small
+// self-contained fixture (an intro card of three paragraphs marked as one group)
+// so the grouping feature is tested independently of the shipped example doc.
 import { JSDOM } from 'jsdom';
 import {
   assignAnchors, collectLeaves, normalizeText, groupShells, groupText, GROUP_ATTR,
 } from '../public/anchoring.js';
 
-const html = readFileSync(new URL('../docs/example.html', import.meta.url), 'utf8');
-const config = JSON.parse(readFileSync(new URL('../docs/example.config.json', import.meta.url), 'utf8'));
+const html = `<!doctype html><html><body>
+  <h1>Title</h1>
+  <div class="intro">
+    <p>This is a sample document used to show and test the reviewer.</p>
+    <p>The three paragraphs in this section are marked as one grouped block.</p>
+    <p>Grouping keeps a multi-paragraph passage as one unit from start to finish.</p>
+  </div>
+  <h2>After</h2>
+  <p>A standalone paragraph outside the group.</p>
+</body></html>`;
+const config = { groups: ['.intro'] };
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.error('  ✗ ' + m); } };
 

@@ -20,7 +20,7 @@ const j = (r) => r.json();
 let r = await fetch(`${base}/api/doc/example`);
 ok(r.status === 200, 'GET doc -> 200');
 let d = await j(r);
-ok(typeof d.baseHtml === 'string' && d.baseHtml.includes('Example Document'), 'baseHtml present');
+ok(typeof d.baseHtml === 'string' && d.baseHtml.includes('A simple example'), 'baseHtml present');
 ok(d.overlay && Object.keys(d.overlay).length === 0, 'overlay empty initially');
 
 // 2. GET missing doc / traversal
