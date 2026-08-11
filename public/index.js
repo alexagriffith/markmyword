@@ -4,6 +4,7 @@
 // don't have as a file.) On a name clash we offer Keep both / Replace / Cancel,
 // like saving a file with an existing name on the desktop. No build step.
 import { icon } from './icons.js';
+import { referencedImages } from './assets.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -162,7 +163,14 @@ async function upload(id, html, overwrite) {
       body: JSON.stringify({ id, html, overwrite }),
     });
     const data = await r.json().catch(() => ({}));
-    if (r.ok) { window.location.href = viewerUrl(id); return; }
+    if (r.ok) {
+      // The doc saved. If it references local images we don't have yet, offer to
+      // bring them along before opening the viewer (a browser can't read the
+      // file's folder for us, so we ask the user to point us at the images).
+      await offerMissingImages(html);
+      window.location.href = viewerUrl(id);
+      return;
+    }
     const mb = data.maxBytes ? (data.maxBytes / 1_000_000).toFixed(1).replace(/\.0$/, '') : '2';
     const errs = {
       invalid_doc_id: 'That name has characters that aren’t allowed.',
@@ -180,6 +188,115 @@ async function upload(id, html, overwrite) {
   } catch {
     showMsg('err', 'Network error — is the server running?');
   }
+}
+
+// After a doc is saved, find the local images it references that the server
+// doesn't already have, and (if any) ask the user to point us at them. A browser
+// can't read the file's sibling folder on its own, so we surface the exact names
+// needed and open a multi-file / folder picker, matching what they choose by
+// basename. Best-effort: anything skipped just shows a placeholder in the viewer.
+async function offerMissingImages(html) {
+  let refs = [];
+  try { refs = referencedImages(html); } catch { refs = []; }
+  if (!refs.length) return;
+
+  // Drop the ones already on the box so we only ask for what's genuinely missing.
+  let have = new Set();
+  try {
+    const a = await fetch('/api/assets').then((r) => r.json());
+    have = new Set((a.assets || []));
+  } catch { /* if the check fails, just ask for all of them */ }
+  const needed = refs.filter((r) => !have.has(r.name));
+  if (!needed.length) return;
+
+  const files = await pickImages(needed);
+  if (!files) return; // user skipped
+
+  // Match picked files to needed names by basename (case-insensitive).
+  const byName = new Map();
+  for (const f of files) byName.set(f.name.toLowerCase(), f);
+  const matched = needed.map((n) => ({ name: n.name, file: byName.get(n.name.toLowerCase()) }))
+    .filter((m) => m.file);
+
+  if (!matched.length) {
+    showMsg('err', 'None of the chosen files matched the images this page needs. You can add them later.');
+    return;
+  }
+
+  let ok = 0;
+  for (const m of matched) {
+    showMsg('ok', `Adding image “${m.name}”…`);
+    try {
+      const dataBase64 = await fileToBase64(m.file);
+      const r = await fetch(withKey('/api/upload-asset'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: m.name, dataBase64 }),
+      });
+      if (r.ok) ok++;
+    } catch { /* skip this one */ }
+  }
+  const still = needed.length - ok;
+  showMsg('ok', `Added ${ok} image${ok === 1 ? '' : 's'}${still ? ` · ${still} still missing` : ''}. Opening…`);
+}
+
+// Read a File as bare base64 (no data: prefix) for the JSON asset upload.
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const res = String(fr.result || '');
+      resolve(res.slice(res.indexOf(',') + 1)); // strip "data:...;base64,"
+    };
+    fr.onerror = () => reject(fr.error);
+    fr.readAsDataURL(file);
+  });
+}
+
+// Modal: "This page needs N images" + list + [Add these images] / [Skip].
+// Resolves to a FileList (user chose files) or null (skipped).
+function pickImages(needed) {
+  return new Promise((resolve) => {
+    const back = document.createElement('div');
+    back.style.cssText = 'position:fixed;inset:0;z-index:50;background:rgba(28,27,25,.28);display:flex;align-items:center;justify-content:center;padding:20px';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:#fffdf8;border:1px solid #e9e5db;border-radius:14px;box-shadow:0 16px 48px rgba(28,27,25,.18);max-width:420px;width:100%;padding:22px 22px 18px;font-family:-apple-system,Segoe UI,sans-serif';
+    const names = needed.map((n) =>
+      `<li style="margin:2px 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:#1c1b19">${escapeHtml(n.name)}</li>`
+    ).join('');
+    const n = needed.length;
+    box.innerHTML = `
+      <div style="font-family:'Iowan Old Style',Georgia,serif;font-size:18px;font-weight:600;margin-bottom:6px">This page needs ${n} image${n === 1 ? '' : 's'}</div>
+      <div style="color:#57534e;font-size:14px;line-height:1.5;margin-bottom:10px">Your file points at ${n === 1 ? 'an image that isn’t' : 'images that aren’t'} here yet. Pick ${n === 1 ? 'it' : 'them'} (or the folder they live in) and they’ll travel with the page.</div>
+      <ul style="margin:0 0 16px;padding-left:18px">${names}</ul>
+      <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+        <button data-c="skip" style="border:1px solid #e9e5db;background:none;border-radius:8px;padding:8px 14px;font-size:13.5px;cursor:pointer;color:#57534e">Skip</button>
+        <button data-c="add" style="border:1px solid #1c1b19;background:#1c1b19;color:#fff;border-radius:8px;padding:8px 14px;font-size:13.5px;font-weight:600;cursor:pointer">Add these images</button>
+      </div>`;
+    back.appendChild(box);
+    document.body.appendChild(back);
+
+    // Hidden multi-file image input (accept multiple; users can also select a
+    // whole folder in the OS dialog on most browsers).
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.multiple = true;
+    input.style.display = 'none';
+    box.appendChild(input);
+
+    const done = (v) => { back.remove(); resolve(v); };
+    box.querySelector('[data-c="skip"]').onclick = () => done(null);
+    box.querySelector('[data-c="add"]').onclick = () => input.click();
+    input.addEventListener('change', () => done(input.files && input.files.length ? input.files : null));
+    back.addEventListener('click', (e) => { if (e.target === back) done(null); });
+    box.querySelector('[data-c="add"]').focus();
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 async function addFromFile(file) {

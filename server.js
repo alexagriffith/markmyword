@@ -4,7 +4,7 @@
 // docs/<id>.html (immutable, trusted). Editor edits + version history live in
 // SQLite. No auth yet (phase 2 adds per-doc passwords).
 import express from 'express';
-import { readFile, writeFile, readdir, access } from 'node:fs/promises';
+import { readFile, writeFile, readdir, access, mkdir } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -108,6 +108,28 @@ async function listDocs() {
     .sort();
 }
 
+// Assets that a deliverable references (banner images, etc.) are stored flat in
+// docs/assets/ and served read-only from /docs/assets. An asset filename is a
+// bare basename — no directory parts, no traversal, and an image extension only.
+// We intentionally keep the namespace shared (not per-doc): filenames are global,
+// which is simplest and matches how the doc's own <img src> basenames resolve.
+const ASSET_NAME = /^[A-Za-z0-9._-]+\.(png|jpe?g|gif|svg|webp|avif|ico|bmp)$/i;
+const isValidAssetName = (name) =>
+  typeof name === 'string' && name.length > 0 && name.length <= 128 &&
+  ASSET_NAME.test(name) && !name.includes('/') && !name.includes('\\') &&
+  name !== '.' && name !== '..';
+const MAX_ASSET_BYTES = LIMITS.MAX_DOC_BYTES; // reuse the per-file cap for images
+
+// The basenames already present in docs/assets/ — so the client only asks the
+// user for images we don't already hold.
+async function listAssets() {
+  const dir = path.join(DOCS_DIR, 'assets');
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    return entries.filter((e) => e.isFile() && isValidAssetName(e.name)).map((e) => e.name);
+  } catch { return []; }
+}
+
 // Optional per-doc config (docs/<id>.config.json). Kept out of the HTML so
 // formatters can't strip block-grouping markers. Currently: { groups: [selector] }.
 // Missing/invalid config is not an error — grouping just defaults to none.
@@ -144,6 +166,48 @@ export function createApp(db, opts = {}) {
   // Read-only static files under docs/assets — never the .html sources themselves
   // (those go through /api/doc so overlays apply).
   app.use('/docs/assets', express.static(path.join(DOCS_DIR, 'assets')));
+
+  // GET /api/assets -> { assets: [name, ...] }  (basenames already on the box, so
+  // the landing page only asks the user for images we don't already have).
+  app.get('/api/assets', readLimiter, async (_req, res) => {
+    noStore(res);
+    res.json({ assets: await listAssets() });
+  });
+
+  // POST /api/upload-asset { name, dataBase64 } -> { ok, name }
+  // Stores an image the uploaded doc references into docs/assets/ (shared, flat).
+  // Owner or guest may add assets (they're inert files, served static); we cap
+  // size, allow only image extensions, and reject any non-basename to prevent
+  // traversal. Not clobbered if it already exists — same name = same image here.
+  app.post('/api/upload-asset', uploadLimiter, async (req, res) => {
+    const { name, dataBase64 } = req.body || {};
+    if (!isValidAssetName(name)) return res.status(400).json({ error: 'invalid_asset_name' });
+    if (typeof dataBase64 !== 'string' || dataBase64.length === 0) {
+      return res.status(400).json({ error: 'empty_asset' });
+    }
+    let buf;
+    try { buf = Buffer.from(dataBase64, 'base64'); } catch { buf = null; }
+    if (!buf || buf.length === 0) return res.status(400).json({ error: 'empty_asset' });
+    if (buf.length > MAX_ASSET_BYTES) {
+      return res.status(413).json({ error: 'too_large', maxBytes: MAX_ASSET_BYTES });
+    }
+    const dir = path.join(DOCS_DIR, 'assets');
+    const file = path.join(dir, name);
+    if (!file.startsWith(dir + path.sep)) return res.status(400).json({ error: 'invalid_asset_name' });
+    // Already have it? Treat as success — the doc's <img> will resolve either way.
+    if (await access(file, fsConstants.F_OK).then(() => true).catch(() => false)) {
+      noStore(res);
+      return res.json({ ok: true, name, existed: true });
+    }
+    try {
+      await mkdir(dir, { recursive: true });
+      await writeFile(file, buf);
+    } catch {
+      return res.status(500).json({ error: 'write_failed' });
+    }
+    noStore(res);
+    res.json({ ok: true, name });
+  });
 
   // GET /api/docs -> { docs: [id, ...] }  (for the landing page)
   app.get('/api/docs', async (_req, res) => {

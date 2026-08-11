@@ -19,6 +19,8 @@ const { createApp } = await import('../server.js');
 const DOCS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'docs');
 const TMP_ID = 'zz-upload-test-doc'; // sorts last; unmistakably a test artifact
 const TMP_FILE = path.join(DOCS_DIR, `${TMP_ID}.html`);
+const TMP_ASSET = 'zz-upload-test-asset.png'; // test image artifact
+const TMP_ASSET_FILE = path.join(DOCS_DIR, 'assets', TMP_ASSET);
 
 const db = openDb(':memory:');
 const server = await new Promise((res) => { const s = createApp(db).listen(0, () => res(s)); });
@@ -32,7 +34,7 @@ const withKey = (u) => u + (u.includes('?') ? '&' : '?') + 'key=' + encodeURICom
 const post = (u, body) => fetch(base + withKey(u), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
 const get = (u) => fetch(base + withKey(u)).then((r) => r.json());
 
-async function cleanup() { await unlink(TMP_FILE).catch(() => {}); }
+async function cleanup() { await unlink(TMP_FILE).catch(() => {}); await unlink(TMP_ASSET_FILE).catch(() => {}); }
 await cleanup(); // in case a prior aborted run left it behind
 
 try {
@@ -84,6 +86,31 @@ try {
   ok((await post('/api/upload', { id: '../evil', html: '<p>x</p>' })).status === 400, 'traversal id -> 400');
   ok((await post('/api/upload', { id: 'good-id', html: '' })).status === 400, 'empty html -> 400');
   ok((await post('/api/upload', { id: 'good-id', html: 'just plain text no tags' })).status === 400, 'non-HTML -> 400');
+
+  // 6. Asset upload: a doc's referenced image travels via /api/upload-asset.
+  //    1x1 transparent PNG.
+  const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  const before = new Set((await get('/api/assets')).assets || []);
+  ok(!before.has(TMP_ASSET), 'test asset not present before upload');
+
+  r = await post('/api/upload-asset', { name: TMP_ASSET, dataBase64: PNG_B64 });
+  ok(r.status === 200, 'upload-asset -> 200');
+  const stored = await readFile(TMP_ASSET_FILE).then(() => true).catch(() => false);
+  ok(stored, 'asset written to docs/assets/');
+  ok(((await get('/api/assets')).assets || []).includes(TMP_ASSET), 'GET /api/assets lists the new image');
+
+  // Re-upload of same name is a no-op success (existed:true), not a clobber error.
+  ok((await (await post('/api/upload-asset', { name: TMP_ASSET, dataBase64: PNG_B64 })).json()).existed === true,
+     'existing asset re-upload -> ok, existed:true');
+
+  // It's served read-only at /docs/assets/<name>.
+  ok((await fetch(`${base}/docs/assets/${TMP_ASSET}`)).status === 200, 'asset served at /docs/assets/');
+
+  // Bad asset inputs.
+  ok((await post('/api/upload-asset', { name: '../evil.png', dataBase64: PNG_B64 })).status === 400, 'traversal asset name -> 400');
+  ok((await post('/api/upload-asset', { name: 'notanimage.txt', dataBase64: PNG_B64 })).status === 400, 'non-image extension -> 400');
+  ok((await post('/api/upload-asset', { name: 'sub/dir.png', dataBase64: PNG_B64 })).status === 400, 'nested path asset name -> 400');
+  ok((await post('/api/upload-asset', { name: 'ok.png', dataBase64: '' })).status === 400, 'empty asset data -> 400');
 } finally {
   await cleanup();
   server.close();

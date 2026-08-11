@@ -5,6 +5,7 @@
 // print the behavior so we can decide what (if anything) to fix.
 import { JSDOM } from 'jsdom';
 import { assignAnchors, assignCommentAnchors, normalizeText, findUnreachableText } from '../public/anchoring.js';
+import { referencedImages, assetBasename } from '../public/assets.js';
 
 let pass = 0, fail = 0, notes = 0;
 const ok = (c, m) => { if (c) { pass++; } else { fail++; console.error('  ✗ ' + m); } };
@@ -143,6 +144,32 @@ console.log('\n=== Format probes ===\n');
   const cmap = await assignCommentAnchors(doc.body);
   ok(cmap.size === 2, 'two identical images yield two distinct comment anchors');
   ok([...cmap.keys()].some((k) => k.includes('#1')), 'second identical image carries #1 suffix');
+}
+
+// 13. referencedImages: which local images must travel with an uploaded doc.
+{
+  console.log('\n13. referencedImages(html) — local <img> the doc needs:');
+  const html = `
+    <img src="banner.png">
+    <img src='img/logo.svg'>
+    <img src=footer-sig.png>
+    <img src="https://cdn.example.com/hosted.png">
+    <img src="/docs/assets/served.png">
+    <img src="data:image/png;base64,AAAA">
+    <img src="">
+    <img alt="no src at all">
+    <img src="banner.png?v=2">`;
+  const refs = referencedImages(html);
+  const names = refs.map((r) => r.name);
+  note(`needed: ${JSON.stringify(names)}`);
+  ok(names.includes('banner.png'), 'plain relative src detected');
+  ok(names.includes('logo.svg'), 'single-quoted, subfolder src detected (basename kept)');
+  ok(names.includes('footer-sig.png'), 'unquoted src detected');
+  ok(!names.includes('hosted.png'), 'absolute URL skipped (loads fine)');
+  ok(!names.includes('served.png'), 'root /docs path skipped (we already serve it)');
+  ok(refs.every((r) => r.name !== ''), 'empty src produces no fetchable name');
+  ok(names.filter((n) => n === 'banner.png').length === 1, 'duplicate (?v=2) de-duped by basename');
+  ok(assetBasename('a/b/c/thing.PNG?x=1#y') === 'thing.PNG', 'assetBasename strips path + query + hash');
 }
 
 console.log(`\n${pass} passed, ${fail} failed, ${notes} notes`);

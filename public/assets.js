@@ -39,6 +39,40 @@ export function isUnresolved(kind) {
   return kind === 'empty' || kind === 'relative';
 }
 
+// The trailing filename of a relative image path, e.g. "img/logo.svg" -> "logo.svg".
+// Used both to tell the user which files to bring and to match the files they pick
+// (a browser hands us basenames, not the doc's relative path). Query/hash trimmed.
+export function assetBasename(url) {
+  const clean = String(url == null ? '' : url).trim().split(/[?#]/)[0];
+  const seg = clean.split('/').filter(Boolean).pop() || '';
+  return seg;
+}
+
+// Parse RAW html (a string, pre-render) for <img> references that won't resolve
+// on our host — the relative paths whose files must travel with the doc. Returns
+// a de-duplicated list of { path, name } (name = basename) in document order,
+// skipping data:/absolute/root urls and empty srcs (nothing to fetch for those).
+// Regex-based on purpose: this runs on the upload string before it's a DOM, and
+// stays dependency-free so the Node tests can import it directly.
+export function referencedImages(html) {
+  const out = [];
+  const seen = new Set();
+  const imgTag = /<img\b[^>]*>/gi;
+  const srcAttr = /\bsrc\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/i;
+  let m;
+  while ((m = imgTag.exec(String(html))) !== null) {
+    const s = srcAttr.exec(m[0]);
+    if (!s) continue;
+    const url = (s[2] ?? s[3] ?? s[4] ?? '').trim();
+    if (classifyAssetUrl(url) !== 'relative') continue; // only fetchable relatives
+    const name = assetBasename(url);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ path: url, name });
+  }
+  return out;
+}
+
 // Build a placeholder element that stands in for a broken <img>, preserving the
 // image's intended box size where known so surrounding layout is undisturbed.
 function makePlaceholder(doc, img, label) {
