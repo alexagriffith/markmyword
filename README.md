@@ -10,6 +10,8 @@ history layered on top. Your markup is never rewritten.
 
 ### 🔗 [**Try the live demo → markmyword.fly.dev**](https://markmyword.fly.dev/)
 
+![markmyword demo — open a document, suggest a rewrite, accept it, download the result](docs/demo.gif)
+
 </div>
 
 ---

@@ -20,3 +20,5 @@ docs/assets/*
 !docs/screenshots/
 docs/screenshots/*
 !docs/screenshots/*.png
+# Demo GIF for the README (synthetic showcase doc, no real content).
+!docs/demo.gif
