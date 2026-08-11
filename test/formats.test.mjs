@@ -5,7 +5,7 @@
 // print the behavior so we can decide what (if anything) to fix.
 import { JSDOM } from 'jsdom';
 import { assignAnchors, assignCommentAnchors, normalizeText, findUnreachableText } from '../public/anchoring.js';
-import { referencedImages, assetBasename } from '../public/assets.js';
+import { referencedImages, assetBasename, healImageAssets, resolveAssets } from '../public/assets.js';
 
 let pass = 0, fail = 0, notes = 0;
 const ok = (c, m) => { if (c) { pass++; } else { fail++; console.error('  ✗ ' + m); } };
@@ -170,6 +170,30 @@ console.log('\n=== Format probes ===\n');
   ok(refs.every((r) => r.name !== ''), 'empty src produces no fetchable name');
   ok(names.filter((n) => n === 'banner.png').length === 1, 'duplicate (?v=2) de-duped by basename');
   ok(assetBasename('a/b/c/thing.PNG?x=1#y') === 'thing.PNG', 'assetBasename strips path + query + hash');
+}
+
+// 14. healImageAssets: relative <img> we DO host get rewritten to /docs/assets/
+//     so they load, instead of being flagged missing.
+{
+  console.log('\n14. healImageAssets(root, available) — point <img> at stored copies:');
+  const doc = new JSDOM('<!doctype html><body>'
+    + '<img src="banner.png">'                 // have it -> heal
+    + '<img src="img/logo.svg">'               // have it (by basename) -> heal
+    + '<img src="nope.png">'                    // not held -> stays missing
+    + '<img src="https://cdn.x/hosted.png">'    // absolute -> untouched
+    + '</body>').window.document;
+  const root = doc.body;
+  const healed = healImageAssets(root, ['banner.png', 'logo.svg']);
+  ok(healed === 2, 'two held images healed');
+  const srcs = [...root.querySelectorAll('img')].map((i) => i.getAttribute('src'));
+  ok(srcs[0] === '/docs/assets/banner.png', 'relative basename rewritten to /docs/assets/');
+  ok(srcs[1] === '/docs/assets/logo.svg', 'subfolder path healed by basename to /docs/assets/');
+  ok(srcs[2] === 'nope.png', 'image we do not hold is left as-is (will be flagged missing)');
+  ok(srcs[3] === 'https://cdn.x/hosted.png', 'absolute URL untouched');
+  // After healing, resolveAssets should only flag the one we truly lack.
+  const report = resolveAssets(root, doc);
+  ok(report.count === 1 && report.missing[0].url === 'nope.png',
+     'only the genuinely-missing image is reported after healing');
 }
 
 console.log(`\n${pass} passed, ${fail} failed, ${notes} notes`);

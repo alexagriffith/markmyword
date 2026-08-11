@@ -99,6 +99,29 @@ function makePlaceholder(doc, img, label) {
   return ph;
 }
 
+// Rewrite relative <img> srcs to the copies we actually host under /docs/assets/.
+// When a doc references `banner.png` (or `img/banner.png`) and we hold a file with
+// that basename, point the <img> at `/docs/assets/banner.png` so it loads instead
+// of becoming a "missing image" placeholder. `available` is a Set/array of asset
+// basenames (from GET /api/assets). Case-insensitive basename match. Returns the
+// number of images healed. Call this BEFORE resolveAssets.
+export function healImageAssets(root, available) {
+  const have = new Map(); // lowercased basename -> real stored name
+  for (const name of (available || [])) have.set(String(name).toLowerCase(), String(name));
+  if (!have.size) return 0;
+  let healed = 0;
+  for (const img of root.querySelectorAll('img')) {
+    const src = img.getAttribute('src');
+    if (classifyAssetUrl(src) !== 'relative') continue; // only fixable relatives
+    const base = assetBasename(src).toLowerCase();
+    const real = have.get(base);
+    if (!real) continue;
+    img.setAttribute('src', `/docs/assets/${encodeURIComponent(real)}`);
+    healed++;
+  }
+  return healed;
+}
+
 // Scan rendered `root` for asset references that won't load, replace broken
 // <img> with placeholders, and return a report the viewer can surface.
 // Returns { missing: [{ tag, url, kind }], count }.

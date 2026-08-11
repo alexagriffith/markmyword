@@ -10,7 +10,7 @@
 //   6. Version panel: list snapshots, preview, restore.
 import { assignAnchors, assignCommentAnchors, normalizeText, GROUP_ATTR, groupShells, findUnreachableText, summarizeUnreachable } from './anchoring.js';
 import { diffWords, renderDiffHtml } from './diff.js';
-import { resolveAssets, forceRevealContent, summarizeMissing } from './assets.js';
+import { resolveAssets, forceRevealContent, summarizeMissing, healImageAssets } from './assets.js';
 import { icon } from './icons.js';
 
 const $ = (s) => document.querySelector(s);
@@ -668,6 +668,13 @@ async function boot(overlayOverride) {
   applyGroupConfig(data.config);
   // Handle assets BEFORE anchoring: swap unresolved <img> for placeholders (so
   // they're never treated as editable text) and force-reveal JS-hidden content.
+  // First, heal relative <img> to the copies we host under /docs/assets/ (uploaded
+  // alongside the doc), so an image that IS on the server actually loads instead
+  // of showing a placeholder. Only what's still missing after this is flagged.
+  try {
+    const avail = (await fetch('/api/assets').then((r) => r.json())).assets || [];
+    healImageAssets(root, avail);
+  } catch { /* non-fatal: fall through to placeholders for anything unresolved */ }
   const assetReport = resolveAssets(root, document);
   forceRevealContent(document);
   anchorMap = await assignAnchors(root);
