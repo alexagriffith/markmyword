@@ -139,6 +139,30 @@ try {
   }
   ok(!ownerBlocked, 'owner is exempt from write rate limiting');
 
+  // 12. Per-viewer scoped listing: owner sees all docs; a guest sees only docs
+  //     they own plus unowned/seed docs; two guests don't see each other's docs.
+  clock += 120_000; // clear any lingering rate-limit windows
+  // Seed a doc with NO owner row (simulates a repo seed doc like `example`) by
+  // writing it straight to the docs dir.
+  const { writeFile } = await import('node:fs/promises');
+  await writeFile(path.join(tmp, 'seed-demo.html'), HTML, 'utf8');
+
+  const alice = makeClient(); await alice.req('GET', '/api/whoami');
+  await alice.req('POST', '/api/upload', { id: 'alice-doc', html: HTML });
+  const bob = makeClient(); await bob.req('GET', '/api/whoami');
+  await bob.req('POST', '/api/upload', { id: 'bob-doc', html: HTML });
+
+  const aliceDocs = (await (await alice.req('GET', '/api/docs')).json()).docs;
+  ok(aliceDocs.includes('alice-doc'), 'guest sees their own doc');
+  ok(aliceDocs.includes('seed-demo'), 'guest sees the unowned seed/demo doc');
+  ok(!aliceDocs.includes('bob-doc'), 'guest does NOT see another guest\'s doc');
+  ok(!aliceDocs.includes('owner-a'), 'guest does NOT see the owner\'s doc');
+
+  const ownerAll = makeClient(); await ownerAll.req('GET', '/api/whoami?key=test-owner-key');
+  const ownerDocs = (await (await ownerAll.req('GET', '/api/docs')).json()).docs;
+  ok(['alice-doc', 'bob-doc', 'owner-a', 'seed-demo'].every((id) => ownerDocs.includes(id)),
+     'owner sees every doc (own, both guests\', and seed)');
+
   console.log(`\n${pass} passed, ${fail} failed`);
 } finally {
   server.close();

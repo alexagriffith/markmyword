@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import {
   openDb, getOverlay, setBlockAndSnapshot, listVersions, getVersion, restoreVersion,
   listSuggestions, addSuggestion, getSuggestion, setSuggestionStatus, acceptSuggestion,
-  setDocOwner, getDocOwner, countDocsOwnedBy, countGuestOwners, deleteDocData,
+  setDocOwner, getDocOwner, countDocsOwnedBy, countGuestOwners, deleteDocData, ownerMap,
 } from './db.js';
 import { makeGuardrails, LIMITS } from './guardrails.js';
 import { randomUUID } from 'node:crypto';
@@ -210,9 +210,18 @@ export function createApp(db, opts = {}) {
   });
 
   // GET /api/docs -> { docs: [id, ...] }  (for the landing page)
-  app.get('/api/docs', async (_req, res) => {
+  // Scoped per viewer: the owner sees every doc; a guest sees only docs they
+  // created PLUS any doc with no owner row (the seed/demo docs, public to all).
+  // This keeps the hosted site from being one shared bucket — a guest's uploads
+  // aren't visible to other guests, and the owner's work isn't listed publicly.
+  app.get('/api/docs', readLimiter, async (req, res) => {
     noStore(res);
-    res.json({ docs: await listDocs() });
+    const all = await listDocs();
+    const { token, isOwner } = req.caller;
+    if (isOwner) return res.json({ docs: all });
+    const owners = ownerMap(db);
+    const visible = all.filter((id) => !(id in owners) || owners[id] === token);
+    res.json({ docs: visible });
   });
 
   // POST /api/upload { id, html, overwrite? } -> { ok, id }

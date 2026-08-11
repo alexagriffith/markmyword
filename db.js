@@ -190,6 +190,16 @@ export function getDocOwner(db, docId) {
   return db.prepare('SELECT owner_token FROM doc_owners WHERE doc_id = ?').get(docId)?.owner_token ?? null;
 }
 
+// Ownership lookup for the whole owners table, as { docId: ownerToken }. Used to
+// scope the landing-page list per viewer: a guest sees only docs they own, plus
+// any doc with NO owner row (the seed/demo docs) which are public to everyone.
+export function ownerMap(db) {
+  const rows = db.prepare('SELECT doc_id, owner_token FROM doc_owners').all();
+  const m = Object.create(null);
+  for (const r of rows) m[r.doc_id] = r.owner_token;
+  return m;
+}
+
 // How many docs this token currently owns (guest cap = 1; owner is exempt).
 export function countDocsOwnedBy(db, ownerToken) {
   return db.prepare('SELECT COUNT(*) n FROM doc_owners WHERE owner_token = ?').get(ownerToken).n;
