@@ -15,3 +15,8 @@ docs/*
 !docs/assets/
 docs/assets/*
 !docs/assets/.gitkeep
+# Storyboard screenshots for the README are synthetic UI captures (no real
+# content) — ship them so the README renders.
+!docs/screenshots/
+docs/screenshots/*
+!docs/screenshots/*.png
