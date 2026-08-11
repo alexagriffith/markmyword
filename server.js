@@ -11,8 +11,11 @@ import { fileURLToPath } from 'node:url';
 import {
   openDb, getOverlay, setBlockAndSnapshot, listVersions, getVersion, restoreVersion,
   listSuggestions, addSuggestion, getSuggestion, setSuggestionStatus, acceptSuggestion,
+  setDocOwner, getDocOwner, countDocsOwnedBy, countGuestOwners, deleteDocData,
 } from './db.js';
+import { makeGuardrails, LIMITS } from './guardrails.js';
 import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // DOCS_DIR holds deliverable HTML (seed + uploads). On a host with an ephemeral
@@ -24,7 +27,7 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const PORT = process.env.PORT || 3939;
 const HOST = process.env.HOST || '0.0.0.0';
 const MAX_TEXT = 50_000;
-const MAX_DOC_BYTES = 5_000_000; // 5 MB cap on an uploaded deliverable
+const MAX_DOC_BYTES = LIMITS.MAX_DOC_BYTES; // per-file size cap (default 2 MB)
 
 const SAFE_ID = /^[a-zA-Z0-9._-]+$/;
 const isValidDocId = (id) =>
@@ -119,16 +122,28 @@ async function readDocConfig(id) {
   } catch { return {}; }
 }
 
-export function createApp(db) {
+export function createApp(db, opts = {}) {
   const app = express();
-  app.use(express.json({ limit: '1mb' }));
+  app.set('trust proxy', true); // behind Fly's proxy; needed for correct client IP
+  // Body limit tracks the file-size cap plus headroom for JSON overhead, so a
+  // paste up to MAX_DOC_BYTES isn't rejected by the parser before our own check.
+  app.use(express.json({ limit: MAX_DOC_BYTES + 256 * 1024 }));
   app.use(express.static(PUBLIC_DIR));
+
+  const noStore = (res) => res.setHeader('Cache-Control', 'no-store');
+
+  // Guardrails: identify caller (owner vs guest) on every request, then apply
+  // per-IP rate limits to the API route groups. `now` is injectable for tests.
+  const { identify, readLimiter, writeLimiter, uploadLimiter } = makeGuardrails({ now: opts.now });
+  app.use(identify);
+  app.get('/api/whoami', (req, res) => {
+    noStore(res);
+    res.json({ isOwner: !!req.caller?.isOwner, docLimit: LIMITS.GUEST_DOC_LIMIT });
+  });
   // Serve document assets (banner images, etc.) referenced by deliverable HTML.
   // Read-only static files under docs/assets — never the .html sources themselves
   // (those go through /api/doc so overlays apply).
   app.use('/docs/assets', express.static(path.join(DOCS_DIR, 'assets')));
-
-  const noStore = (res) => res.setHeader('Cache-Control', 'no-store');
 
   // GET /api/docs -> { docs: [id, ...] }  (for the landing page)
   app.get('/api/docs', async (_req, res) => {
@@ -137,16 +152,17 @@ export function createApp(db) {
   });
 
   // POST /api/upload { id, html, overwrite? } -> { ok, id }
-  // Writes a new deliverable to docs/<id>.html. HTML is trusted styling but we
+  // Writes a new document to docs/<id>.html. HTML is trusted styling but we
   // strip active content (scripts/handlers/js: URLs) so the stored file is inert.
-  app.post('/api/upload', async (req, res) => {
+  app.post('/api/upload', uploadLimiter, async (req, res) => {
     const { id, html, overwrite } = req.body || {};
+    const { token, isOwner } = req.caller;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     if (typeof html !== 'string' || html.trim().length === 0) {
       return res.status(400).json({ error: 'empty_html' });
     }
     if (Buffer.byteLength(html, 'utf8') > MAX_DOC_BYTES) {
-      return res.status(413).json({ error: 'too_large' });
+      return res.status(413).json({ error: 'too_large', maxBytes: MAX_DOC_BYTES });
     }
     // Must look like HTML (a tag somewhere) — guards against pasted plain text.
     if (!/<[a-z!][\s\S]*>/i.test(html)) return res.status(400).json({ error: 'not_html' });
@@ -154,12 +170,30 @@ export function createApp(db) {
     const file = path.join(DOCS_DIR, `${id}.html`);
     if (!file.startsWith(DOCS_DIR + path.sep)) return res.status(400).json({ error: 'invalid_doc_id' });
 
+    const existsBefore = await access(file, fsConstants.F_OK).then(() => true).catch(() => false);
+
     // Refuse to clobber an existing doc unless the caller opts in — an accidental
-    // re-upload would otherwise silently replace a reviewed deliverable (its
+    // re-upload would otherwise silently replace a reviewed document (its
     // overlay/suggestions/history in SQLite would then point at different text).
-    if (!overwrite) {
-      const exists = await access(file, fsConstants.F_OK).then(() => true).catch(() => false);
-      if (exists) return res.status(409).json({ error: 'doc_exists' });
+    if (existsBefore && !overwrite) return res.status(409).json({ error: 'doc_exists' });
+
+    // Guardrails: guests are capped to GUEST_DOC_LIMIT docs, and the box holds at
+    // most MAX_GUEST_OWNERS distinct guests. The owner (OWNER_KEY) is exempt.
+    // Overwriting a doc you already own doesn't consume a new slot.
+    if (!isOwner) {
+      const ownsThis = getDocOwner(db, id) === token;
+      const creatingNew = !existsBefore || !ownsThis;
+      if (creatingNew) {
+        // Overwriting someone else's doc is not allowed for guests.
+        if (existsBefore && !ownsThis) return res.status(403).json({ error: 'not_your_doc' });
+        if (countDocsOwnedBy(db, token) >= LIMITS.GUEST_DOC_LIMIT) {
+          return res.status(403).json({ error: 'guest_doc_limit', limit: LIMITS.GUEST_DOC_LIMIT });
+        }
+        // New distinct guest? enforce the global ceiling.
+        if (countDocsOwnedBy(db, token) === 0 && countGuestOwners(db) >= LIMITS.MAX_GUEST_OWNERS) {
+          return res.status(503).json({ error: 'capacity_full' });
+        }
+      }
     }
 
     try {
@@ -167,12 +201,33 @@ export function createApp(db) {
     } catch {
       return res.status(500).json({ error: 'write_failed' });
     }
+    // Record ownership (owner docs use the shared 'owner' token).
+    setDocOwner(db, id, isOwner ? 'owner' : token, new Date().toISOString());
+    noStore(res);
+    res.json({ ok: true, id });
+  });
+
+  // DELETE /api/doc/:id — remove a document (file + all SQLite state). Allowed
+  // for the owner, or the guest who created it (frees their one slot).
+  app.delete('/api/doc/:id', writeLimiter, async (req, res) => {
+    const { id } = req.params;
+    const { token, isOwner } = req.caller;
+    if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
+    const file = path.join(DOCS_DIR, `${id}.html`);
+    if (!file.startsWith(DOCS_DIR + path.sep)) return res.status(400).json({ error: 'invalid_doc_id' });
+    const owner = getDocOwner(db, id);
+    const exists = await access(file, fsConstants.F_OK).then(() => true).catch(() => false);
+    if (!exists && owner == null) return res.status(404).json({ error: 'doc_not_found' });
+    if (!isOwner && owner !== token) return res.status(403).json({ error: 'not_your_doc' });
+    await rm(file, { force: true }).catch(() => {});
+    await rm(path.join(DOCS_DIR, `${id}.config.json`), { force: true }).catch(() => {});
+    deleteDocData(db)(id);
     noStore(res);
     res.json({ ok: true, id });
   });
 
   // GET /api/doc/:id -> { id, baseHtml, overlay }
-  app.get('/api/doc/:id', async (req, res) => {
+  app.get('/api/doc/:id', readLimiter, async (req, res) => {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     const baseHtml = await readDocHtml(id);
@@ -183,7 +238,7 @@ export function createApp(db) {
   });
 
   // POST /api/edit/:id { anchor, text } -> { ok, overlay }
-  app.post('/api/edit/:id', async (req, res) => {
+  app.post('/api/edit/:id', writeLimiter, async (req, res) => {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     if (await readDocHtml(id) == null) return res.status(404).json({ error: 'doc_not_found' });
@@ -201,7 +256,7 @@ export function createApp(db) {
   });
 
   // GET /api/versions/:id -> { versions: [{id, ts, label}] }
-  app.get('/api/versions/:id', (req, res) => {
+  app.get('/api/versions/:id', readLimiter, (req, res) => {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     noStore(res);
@@ -209,7 +264,7 @@ export function createApp(db) {
   });
 
   // GET /api/version/:id/:versionId -> { id, ts, label, overlay }  (preview)
-  app.get('/api/version/:id/:versionId', (req, res) => {
+  app.get('/api/version/:id/:versionId', readLimiter, (req, res) => {
     const { id, versionId } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     const v = getVersion(db, id, Number(versionId));
@@ -219,7 +274,7 @@ export function createApp(db) {
   });
 
   // POST /api/restore/:id { versionId } -> { ok, overlay }
-  app.post('/api/restore/:id', (req, res) => {
+  app.post('/api/restore/:id', writeLimiter, (req, res) => {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     const versionId = Number(req.body?.versionId);
@@ -233,7 +288,7 @@ export function createApp(db) {
   // --- suggestions (tracked changes; owner can suggest + accept/reject) ---
 
   // GET /api/suggestions/:id -> { suggestions: [...] }  (open only)
-  app.get('/api/suggestions/:id', (req, res) => {
+  app.get('/api/suggestions/:id', readLimiter, (req, res) => {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     noStore(res);
@@ -241,7 +296,7 @@ export function createApp(db) {
   });
 
   // POST /api/suggest/:id { anchor, quote, body, kind, author } -> { ok, suggestion }
-  app.post('/api/suggest/:id', async (req, res) => {
+  app.post('/api/suggest/:id', writeLimiter, async (req, res) => {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     if (await readDocHtml(id) == null) return res.status(404).json({ error: 'doc_not_found' });
@@ -280,7 +335,7 @@ export function createApp(db) {
   });
 
   // POST /api/suggest/:id/:sid/accept -> { ok, overlay }
-  app.post('/api/suggest/:id/:sid/accept', (req, res) => {
+  app.post('/api/suggest/:id/:sid/accept', writeLimiter, (req, res) => {
     const { id, sid } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     const s = getSuggestion(db, sid);
@@ -300,7 +355,7 @@ export function createApp(db) {
   });
 
   // POST /api/suggest/:id/:sid/reject -> { ok }
-  app.post('/api/suggest/:id/:sid/reject', (req, res) => {
+  app.post('/api/suggest/:id/:sid/reject', writeLimiter, (req, res) => {
     const { id, sid } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     const s = getSuggestion(db, sid);
@@ -309,6 +364,19 @@ export function createApp(db) {
     setSuggestionStatus(db, sid, 'rejected');
     noStore(res);
     res.json({ ok: true });
+  });
+
+  // JSON error handler. Body-parser rejects an over-limit request BEFORE our own
+  // size check with a PayloadTooLargeError (413); surface it as clean JSON with
+  // the file-size limit, and turn any other error into a 500 without a stack.
+  app.use((err, _req, res, _next) => {
+    if (err?.type === 'entity.too.large' || err?.status === 413) {
+      return res.status(413).json({ error: 'too_large', maxBytes: MAX_DOC_BYTES });
+    }
+    if (err?.status === 400 || err?.type === 'entity.parse.failed') {
+      return res.status(400).json({ error: 'bad_request' });
+    }
+    return res.status(500).json({ error: 'server_error' });
   });
 
   return app;
@@ -335,6 +403,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   await seedDocs();
   const db = openDb();
   createApp(db).listen(PORT, HOST, () => {
-    console.log(`markmyword on http://${HOST}:${PORT}  (open / to list + upload deliverables)`);
+    console.log(`markmyword on http://${HOST}:${PORT}  (open / to list + add files)`);
   });
 }

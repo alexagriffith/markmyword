@@ -3,10 +3,18 @@
 // /api/doc, (d) refuses to clobber without overwrite, and (e) rejects bad input.
 // Uploads go to a throwaway id under docs/ and are deleted at the end.
 import { openDb } from '../db.js';
-import { createApp } from '../server.js';
 import { readFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// Run this suite as the OWNER: it exercises upload/overwrite mechanics, which is
+// the owner's job. Owner mode also bypasses the per-guest doc cap so repeated
+// overwrites of the same test id aren't blocked by the guardrails. (Guardrail
+// behavior itself is covered by test/guardrails.test.mjs.) OWNER_KEY is read by
+// guardrails at module load, so set it BEFORE dynamically importing server.js.
+process.env.OWNER_KEY = process.env.OWNER_KEY || 'upload-test-owner-key';
+const KEY = process.env.OWNER_KEY;
+const { createApp } = await import('../server.js');
 
 const DOCS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'docs');
 const TMP_ID = 'zz-upload-test-doc'; // sorts last; unmistakably a test artifact
@@ -18,8 +26,11 @@ const base = `http://localhost:${server.address().port}`;
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.error('  ✗ ' + m); } };
-const post = (u, body) => fetch(base + u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
-const get = (u) => fetch(base + u).then((r) => r.json());
+// The owner key promotes every request to owner (no cookie jar needed since we
+// present the key each time), so ownership/cap checks don't interfere.
+const withKey = (u) => u + (u.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(KEY);
+const post = (u, body) => fetch(base + withKey(u), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+const get = (u) => fetch(base + withKey(u)).then((r) => r.json());
 
 async function cleanup() { await unlink(TMP_FILE).catch(() => {}); }
 await cleanup(); // in case a prior aborted run left it behind

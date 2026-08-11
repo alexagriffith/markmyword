@@ -38,14 +38,27 @@
     /* Existing documents */
     .doc-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:12px; }
     .doc-card {
-      display:flex; align-items:center; gap:10px; text-decoration:none;
-      border:1px solid var(--hs-line); border-radius:10px; padding:13px 14px;
-      background: var(--hs-panel); color: var(--hs-ink); transition: box-shadow .14s, border-color .14s, transform .06s;
+      position:relative; display:flex; align-items:center;
+      border:1px solid var(--hs-line); border-radius:10px;
+      background: var(--hs-panel); transition: box-shadow .14s, border-color .14s, transform .06s;
     }
     .doc-card:hover { border-color:#d4cdbe; box-shadow:0 6px 18px rgba(40,40,40,.07); }
     .doc-card:active { transform: translateY(1px); }
+    .doc-open {
+      display:flex; align-items:center; gap:10px; text-decoration:none;
+      color: var(--hs-ink); padding:13px 14px; flex:1; min-width:0;
+    }
     .doc-card .ic { color: var(--hs-ink-3); display:inline-flex; flex:none; }
     .doc-card .name { font-weight:600; font-size:14px; word-break:break-word; }
+    .doc-del {
+      flex:none; width:28px; height:28px; margin-right:8px; padding:0;
+      border:1px solid transparent; border-radius:7px; background:none;
+      color: var(--hs-ink-3); font-size:18px; line-height:1; cursor:pointer;
+      opacity:0; transition: opacity .12s, background-color .12s, color .12s;
+    }
+    .doc-card:hover .doc-del { opacity:1; }
+    .doc-del:hover { background:#fbe9e7; color:#c0392b; border-color:#f0c6c0; }
+    .doc-del:focus-visible { opacity:1; outline:2px solid var(--hs-accent); }
     .doc-empty { color: var(--hs-ink-3); font-family: var(--hs-serif); font-style:italic; font-size:15px; }
 
     /* Upload form */

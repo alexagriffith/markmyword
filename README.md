@@ -122,7 +122,23 @@ into the original markup — no markmyword attributes leak.
 
 ---
 
-## 🚀 Run it locally
+## 🚀 Two ways to use markmyword
+
+### A) Use the hosted demo — nothing to install
+
+Just open **[markmyword.fly.dev](https://markmyword.fly.dev/)**.
+
+- **To review:** click a shared link, no account needed. Switch to *Suggesting*,
+  highlight text, propose a rewrite, or comment on any element.
+- **To add your own file:** on the home page, name it, pick an `.html` file or
+  paste markup, and hit **Add & open**.
+
+> **Guest limits on the shared demo** (so it stays fast and cheap for everyone):
+> each guest can have **1 file** at a time (delete it to add another), the demo
+> holds a limited number of guests, files are capped at **2 MB**, and requests
+> are rate-limited. Want more? Run your own instance (below) — you set the limits.
+
+### B) Run it locally
 
 ```bash
 npm install
@@ -133,13 +149,57 @@ npm start           # http://localhost:3939
 
 An `example` document ships in `docs/` so it works out of the box.
 
-### Add a file
-
-- **Home page (`/`)** lists every file in `docs/` and has an add form: name it,
-  pick an `.html` file or paste markup, hit **Add & open**.
+- **Home page (`/`)** lists every file in `docs/` and has an add form.
 - Or drop `docs/<id>.html` in directly and open `/viewer.html?doc=<id>`.
 - Optional grouping: `docs/<id>.config.json` `{ "groups": ["<css selector>"] }`
   edits a multi-element section as one block.
+
+---
+
+## 🛠️ Set up your own instance
+
+markmyword is a small stateful Node app. Anyone can stand up their own copy —
+here's the fastest path, on **Fly.io** (a `Dockerfile` + `fly.toml` ship in the
+repo). Any always-on host with a persistent disk works the same way.
+
+```bash
+# 0. get the code + the Fly CLI (https://fly.io/docs/flyctl/install/)
+git clone https://github.com/alexagriffith/markmyword.git && cd markmyword
+
+# 1. create the app + a persistent volume for SQLite and uploaded files
+fly launch --no-deploy            # pick a name + region; keep the generated fly.toml
+fly volumes create markmyword_data --size 1 --region <your-region>
+
+# 2. set secrets (see the table below). OWNER_KEY makes YOU the owner.
+fly secrets set SESSION_SECRET=$(openssl rand -hex 32) OWNER_KEY=$(openssl rand -hex 24)
+
+# 3. ship it
+fly deploy
+```
+
+Then open your app URL. To act as the **owner** (unlimited files, exempt from the
+guest cap and rate limits), append your key once: `https://<you>.fly.dev/?key=<OWNER_KEY>`.
+markmyword sets a cookie so the tab stays owner; share the plain URL (no key) with
+reviewers.
+
+### Configuration (env vars)
+
+| Var | Default | What it does |
+|-----|---------|--------------|
+| `OWNER_KEY` | *(unset → owner mode off)* | Secret that promotes a visitor to **owner** via `?key=…`. Unlimited files, no rate limit. |
+| `SESSION_SECRET` | *(random per boot)* | Signs the owner/guest cookies. Set a stable value in production. |
+| `MMW_GUEST_DOC_LIMIT` | `1` | Files a single guest may own at once. |
+| `MMW_MAX_GUEST_OWNERS` | `15` | Max distinct guests on the box. |
+| `MMW_MAX_DOC_BYTES` | `2000000` | Per-file size cap (bytes). |
+| `MMW_READ_PER_MIN` | `300` | Read requests per minute per IP. |
+| `MMW_WRITE_PER_MIN` | `60` | Write requests (edit/suggest/…) per minute per IP. |
+| `MMW_UPLOAD_PER_HOUR` | `10` | Uploads per hour per IP. |
+| `HS_DB_PATH` | `./data/app.db` | SQLite file location (point at the volume). |
+| `HS_DOCS_DIR` | `./docs` | Where document files live (point at the volume). |
+| `PORT` / `HOST` | `3939` / `0.0.0.0` | Bind address. |
+
+Backup = copy `app.db` off the volume. Add a built-in file = commit
+`docs/<id>.html`.
 
 ---
 
