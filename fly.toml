@@ -1,0 +1,30 @@
+# markmyword on Fly.io — one always-on machine + a persistent volume for
+# SQLite and uploaded docs. app name is set at `fly launch` time.
+app = "markmyword"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  HS_DB_PATH = "/data/app.db"
+  HS_DOCS_DIR = "/data/docs"
+
+# Persistent disk: SQLite writes + uploaded deliverables survive redeploys.
+[mounts]
+  source = "markmyword_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Keep one machine always on (stateful app: never scale the writer to zero
+  # or to multiple instances — one SQLite writer only).
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

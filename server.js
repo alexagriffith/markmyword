@@ -15,9 +15,14 @@ import {
 import { randomUUID } from 'node:crypto';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DOCS_DIR = path.join(__dirname, 'docs');
+// DOCS_DIR holds deliverable HTML (seed + uploads). On a host with an ephemeral
+// image filesystem (Fly), point HS_DOCS_DIR at a persistent volume so uploads
+// survive redeploys; the baked-in seed docs are copied in on first boot.
+const SEED_DOCS_DIR = path.join(__dirname, 'docs');
+const DOCS_DIR = process.env.HS_DOCS_DIR || SEED_DOCS_DIR;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const PORT = process.env.PORT || 3939;
+const HOST = process.env.HOST || '0.0.0.0';
 const MAX_TEXT = 50_000;
 const MAX_DOC_BYTES = 5_000_000; // 5 MB cap on an uploaded deliverable
 
@@ -309,10 +314,27 @@ export function createApp(db) {
   return app;
 }
 
+// Copy the baked-in seed docs onto a persistent DOCS_DIR the first time we boot
+// there (empty volume). Never overwrites an existing file, so real uploads and
+// edited seeds are preserved across deploys.
+async function seedDocs() {
+  if (DOCS_DIR === SEED_DOCS_DIR) return; // running against the baked-in dir
+  const { mkdir, copyFile, readdir: rd } = await import('node:fs/promises');
+  await mkdir(path.join(DOCS_DIR, 'assets'), { recursive: true });
+  const entries = await rd(SEED_DOCS_DIR, { withFileTypes: true }).catch(() => []);
+  for (const e of entries) {
+    if (!e.isFile()) continue;
+    const dest = path.join(DOCS_DIR, e.name);
+    const exists = await access(dest, fsConstants.F_OK).then(() => true).catch(() => false);
+    if (!exists) await copyFile(path.join(SEED_DOCS_DIR, e.name), dest);
+  }
+}
+
 // Start only when run directly (not when imported by tests).
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  await seedDocs();
   const db = openDb();
-  createApp(db).listen(PORT, () => {
-    console.log(`html-suggest on http://localhost:${PORT}  (open / to list + upload deliverables)`);
+  createApp(db).listen(PORT, HOST, () => {
+    console.log(`markmyword on http://${HOST}:${PORT}  (open / to list + upload deliverables)`);
   });
 }
