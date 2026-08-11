@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>html-suggest · viewer</title>
+  <style>
+    /* ── Typography & palette ──────────────────────────────────────────────
+       Modeled on Thinking Machines Lab / "Inkling" (thinkingmachines.ai):
+       warm off-white ground, warm near-black ink (Gruvbox-ish greys), a serif
+       reading face paired with a clean grotesque for UI, and links underlined
+       at ~30% opacity. Their GT America (sans) and Iowan Old Style BT (serif)
+       are licensed, so we use free look-alikes:
+         • serif  — Iowan Old Style ships with macOS/iOS, so it renders natively
+                    for the author; Georgia is the cross-platform free fallback.
+         • sans   — the system grotesque stack (SF / Segoe / Roboto), which is
+                    what GT America itself falls back to.
+       IMPORTANT: these styles dress the html-suggest CHROME only (top bar,
+       panels, popups, cards). The rendered deliverable in #hs-doc-root keeps
+       its own CSS untouched — we never restyle the document being reviewed. */
+    :root {
+      --hs-accent:#0066cc; --hs-ok:#3d8b40; --hs-dirty:#b58100; --hs-bar-h:46px;
+      /* Inkling-style warm palette */
+      --hs-bg:#faf9f5;        /* warm off-white page */
+      --hs-ink:#282828;       /* warm near-black */
+      --hs-ink-2:#504945;     /* secondary text */
+      --hs-ink-3:#6b6866;     /* muted labels */
+      --hs-line:#e6e2d8;      /* hairline borders on warm ground */
+      --hs-panel:#ffffff;
+      --hs-bar-bg:#282828;    /* warm dark bar (not cold #151) */
+      --hs-serif:'Iowan Old Style','Iowan Old Style BT',Georgia,'Times New Roman',serif;
+      --hs-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+      --hs-mono:'SF Mono','Monaco','Inconsolata','Fira Code',ui-monospace,monospace;
+    }
+    html, body { margin:0; padding:0; }
+    body {
+      font-family: var(--hs-sans);
+      background: var(--hs-bg);
+      color: var(--hs-ink);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Top bar */
+    #hs-bar {
+      position: sticky; top:0; z-index: 1000; height: var(--hs-bar-h);
+      display:flex; align-items:center; gap:14px; padding:0 18px;
+      background: var(--hs-bar-bg); color:#faf9f5; font-size:13px;
+      border-bottom:1px solid rgba(0,0,0,.35);
+    }
+    #hs-bar .hs-title { font-family: var(--hs-serif); font-weight:600; font-size:16px; letter-spacing:-.01em; }
+    #hs-bar .hs-doc { color:#b7b0a3; font-style:italic; font-family: var(--hs-serif); font-size:14px; }
+    #hs-bar .hs-spacer { flex:1; }
+    #hs-status { display:flex; align-items:center; gap:7px; font-size:12.5px; color:#cfcfcf; }
+    #hs-status .dot { width:9px; height:9px; border-radius:50%; background:#666; }
+    #hs-status.saved .dot { background: var(--hs-ok); }
+    #hs-status.dirty .dot { background: var(--hs-dirty); }
+    #hs-status.error .dot { background:#c9190b; }
+    .hs-toggle { display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none; }
+    .hs-toggle input { accent-color: var(--hs-accent); }
+    #hs-warn { background:#7a5b00; color:#fff; font-size:12px; padding:6px 16px; display:none; }
+    #hs-warn.show { display:block; }
+
+    /* Rendered document */
+    #hs-doc-root { }
+    /* Editable affordance — only visible in edit mode via body class */
+    body.hs-edit [data-hs-block] { outline: 1px dashed transparent; transition: outline-color .12s, background-color .12s; border-radius:2px; }
+    body.hs-edit [data-hs-block]:hover { outline-color: rgba(0,102,204,.45); cursor: text; }
+    body.hs-edit [data-hs-block][contenteditable="true"]:focus { outline: 2px solid var(--hs-accent); background: rgba(0,102,204,.06); }
+    #hs-empty { padding:48px; text-align:center; color: var(--hs-ink-3); font-family: var(--hs-serif); font-style:italic; font-size:15px; }
+
+    /* History panel */
+    #hs-history-btn { background:#2b2b2b; color:#fff; border:1px solid #444; border-radius:6px; padding:5px 10px; font-size:12.5px; cursor:pointer; }
+    #hs-history-btn:hover { background:#3a3a3a; }
+    #hs-versions { position: fixed; top: var(--hs-bar-h); right:0; width:320px; height: calc(100vh - var(--hs-bar-h)); background: var(--hs-panel); border-left:1px solid var(--hs-line); box-shadow:-8px 0 24px rgba(40,40,40,.07); overflow:auto; transform: translateX(100%); transition: transform .18s ease; z-index:900; padding:14px; box-sizing:border-box; }
+    body.hs-show-history #hs-versions { transform: translateX(0); }
+    #hs-versions h3 { margin:4px 0 14px; font-family: var(--hs-serif); font-size:16px; font-style:italic; letter-spacing:0; text-transform:none; color: var(--hs-ink); }
+    .hs-v-row { display:flex; align-items:center; gap:8px; padding:8px 6px; border-bottom:1px solid #eee; font-size:12.5px; }
+    .hs-v-when { flex:1; color:#151515; }
+    .hs-v-label { color:#0066cc; font-size:11px; }
+    .hs-v-restore { background:#f0f0f0; border:1px solid #ccc; border-radius:5px; padding:3px 9px; cursor:pointer; font-size:12px; }
+    .hs-v-restore:hover { background:#e2e2e2; }
+    .hs-v-empty, .hs-v-load { color:#888; font-size:12.5px; padding:8px 6px; }
+    .hs-v-toggle { background:none; border:none; cursor:pointer; color:#6a6e73; font-size:12px; padding:0 4px 0 0; line-height:1; }
+    .hs-v-detail { display:none; padding:6px 8px 12px 20px; border-bottom:1px solid #eee; }
+    .hs-v-detail.open { display:block; }
+    .hs-v-nochange { color:#999; font-size:12px; font-style:italic; }
+    .hs-diff-block { font-size:12.5px; line-height:1.5; color:#3a3a3a; padding:6px 0; border-top:1px dashed #eee; white-space:pre-wrap; word-break:break-word; }
+    .hs-diff-block:first-child { border-top:none; }
+    .hs-diff-ins { background:#d7f0d7; color:#1c5c1c; text-decoration:none; border-radius:2px; }
+    .hs-diff-del { background:#f7d4d4; color:#8a1c1c; text-decoration:line-through; border-radius:2px; }
+
+    /* Mode selector */
+    .hs-mode-wrap { display:flex; align-items:center; gap:6px; }
+    .hs-mode-icon { display:inline-flex; align-items:center; color:#cfcfcf; }
+    .hs-btn-ic { display:inline-flex; align-items:center; margin-right:5px; vertical-align:-0.14em; }
+    #hs-bar button { display:inline-flex; align-items:center; }
+    .hs-mode-wrap select { background:#2b2b2b; color:#fff; border:1px solid #444; border-radius:6px; padding:5px 8px; font-size:12.5px; cursor:pointer; }
+    #hs-suggest-btn, #hs-history-btn { background:#2b2b2b; color:#fff; border:1px solid #444; border-radius:6px; padding:5px 10px; font-size:12.5px; cursor:pointer; }
+    #hs-suggest-btn:hover, #hs-history-btn:hover { background:#3a3a3a; }
+    #hs-suggest-count { display:none; margin-left:6px; background:#CD302A; color:#fff; border-radius:10px; padding:0 6px; font-size:11px; font-weight:700; }
+
+    /* Suggest mode: blocks get a distinct hover affordance (click to suggest) */
+    body.hs-suggest [data-hs-block], body.hs-suggest [data-hs-anchor] { border-radius:2px; transition: background-color .12s, outline-color .12s; outline:1px dashed transparent; }
+    body.hs-suggest [data-hs-anchor]:hover { cursor:pointer; outline-color: rgba(122,79,156,.5); background: rgba(122,79,156,.06); }
+    /* Non-text elements are commentable in suggest mode: distinct dashed affordance */
+    body.hs-suggest [data-hs-comment-anchor] { outline:1px dashed transparent; transition: outline-color .12s; border-radius:3px; }
+    body.hs-suggest [data-hs-comment-anchor]:hover { cursor:pointer; outline:2px dashed rgba(44,90,178,.6); }
+    [data-hs-comment-anchor].hs-flash { animation: hs-flash 1.1s ease; }
+    [data-hs-anchor].hs-flash { animation: hs-flash 1.1s ease; }
+    @keyframes hs-flash { 0%,100%{ background:transparent;} 30%{ background: rgba(217,166,46,.35);} }
+
+    /* Suggest popup */
+    .hs-suggest-pop { position:absolute; z-index:1200; width:320px; background:#fff; border:1px solid #cfcfcf; border-radius:10px; box-shadow:0 10px 30px rgba(0,0,0,.18); padding:10px; box-sizing:border-box; }
+    .hs-sp-tabs { display:flex; gap:6px; margin-bottom:8px; }
+    .hs-sp-tabs button { flex:1; background:#f2f2f2; border:1px solid #ddd; border-radius:6px; padding:5px; font-size:12px; cursor:pointer; }
+    .hs-sp-tabs button.active { background:#7A4F9C; color:#fff; border-color:#7A4F9C; }
+    .hs-sp-text { width:100%; box-sizing:border-box; border:1px solid var(--hs-line); border-radius:6px; padding:8px; font-family: var(--hs-serif); font-size:14px; line-height:1.5; resize:vertical; color: var(--hs-ink); }
+    .hs-sp-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:8px; }
+    .hs-sp-actions button { border-radius:6px; padding:5px 12px; font-size:12.5px; cursor:pointer; border:1px solid #ccc; background:#f0f0f0; }
+    .hs-sp-submit { background:#7A4F9C !important; color:#fff; border-color:#7A4F9C !important; }
+    .hs-sp-scope { font-size:11.5px; color:#7A4F9C; background:#f6f0fb; border:1px solid #e6d8f2; border-radius:6px; padding:5px 8px; margin-bottom:8px; font-style:italic; }
+
+    /* Floating "Suggest edit" bar over a text selection (Suggesting mode) */
+    .hs-span-bar { position:absolute; z-index:1250; }
+    .hs-span-suggest { background:#2A2A2A; color:#fff; border:none; border-radius:7px; padding:6px 11px; font-size:12.5px; font-weight:600; cursor:pointer; box-shadow:0 6px 18px rgba(0,0,0,.28); white-space:nowrap; }
+    .hs-span-suggest:hover { background:#7A4F9C; }
+
+    /* Suggestions panel */
+    #hs-suggestions { position: fixed; top: var(--hs-bar-h); right:0; width:340px; height: calc(100vh - var(--hs-bar-h)); background: var(--hs-panel); border-left:1px solid var(--hs-line); box-shadow:-8px 0 24px rgba(40,40,40,.07); overflow:auto; transform: translateX(100%); transition: transform .18s ease; z-index:899; padding:14px; box-sizing:border-box; }
+    body.hs-show-suggest #hs-suggestions { transform: translateX(0); }
+    #hs-suggestions h3 { margin:4px 0 14px; font-family: var(--hs-serif); font-size:16px; font-style:italic; letter-spacing:0; text-transform:none; color: var(--hs-ink); }
+    .hs-sg-empty { color:#888; font-size:12.5px; padding:8px 6px; }
+    .hs-sg-card { border:1px solid var(--hs-line); border-radius:8px; padding:11px; margin-bottom:11px; background:#fffefb; }
+    .hs-sg-meta { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+    .hs-sg-kind { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; padding:1px 7px; border-radius:10px; }
+    .hs-sg-kind.rewrite { background:#efe3f7; color:#7A4F9C; }
+    .hs-sg-kind.comment { background:#e3eefc; color:#2C5AB2; }
+    .hs-sg-span { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; padding:1px 6px; border-radius:10px; background:#fff4e0; color:#b5811a; }
+    .hs-sg-author { font-size:11.5px; color:#888; }
+    .hs-sg-diff { font-size:12.5px; line-height:1.5; white-space:pre-wrap; word-break:break-word; color:#3a3a3a; }
+    .hs-sg-quote { font-size:11.5px; color:#999; font-style:italic; margin-bottom:4px; }
+    .hs-sg-body { font-family: var(--hs-serif); font-size:14px; line-height:1.55; color: var(--hs-ink); }
+    .hs-sg-actions { display:flex; gap:6px; margin-top:8px; }
+    .hs-sg-actions button { border-radius:6px; padding:3px 10px; font-size:12px; cursor:pointer; border:1px solid #ccc; background:#f2f2f2; }
+    .hs-sg-accept { background:#3d8b40 !important; color:#fff; border-color:#3d8b40 !important; }
+    .hs-sg-goto { margin-left:auto; }
+  </style>
+</head>
+<body>
+  <div id="hs-bar">
+    <span class="hs-title">html-suggest</span>
+    <span class="hs-doc" id="hs-docname">—</span>
+    <span class="hs-spacer"></span>
+    <label class="hs-mode-wrap" title="Editing applies changes directly; Suggesting proposes tracked changes">
+      <span id="hs-mode-icon" class="hs-mode-icon" aria-hidden="true"></span>
+      <select id="hs-mode">
+        <option value="edit">Editing</option>
+        <option value="suggest">Suggesting</option>
+      </select>
+    </label>
+    <button id="hs-suggest-btn" title="Open suggestions"><span class="hs-btn-ic" id="hs-suggest-ic"></span>Suggestions<span id="hs-suggest-count"></span></button>
+    <button id="hs-history-btn" title="Version history"><span class="hs-btn-ic" id="hs-history-ic"></span>History</button>
+    <span id="hs-status"><span class="dot"></span><span class="txt">Loading…</span></span>
+  </div>
+  <div id="hs-warn"></div>
+  <aside id="hs-versions"><h3>Version history</h3></aside>
+  <aside id="hs-suggestions"><h3>Suggestions</h3></aside>
+  <div id="hs-doc-root"><div id="hs-empty">Loading document…</div></div>
+
+  <script type="module" src="/viewer.js"></script>
+</body>
+</html>

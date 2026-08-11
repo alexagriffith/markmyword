@@ -1,0 +1,20 @@
+{
+  "name": "markmyword",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Google-Docs-style suggesting/commenting layer over any HTML deliverable",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test/anchoring.test.mjs && node test/formats.test.mjs && node test/group.test.mjs && node test/api.test.mjs && node test/suggestions.test.mjs && node test/upload.test.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1",
+    "playwright-core": "^1.62.1"
+  }
+}

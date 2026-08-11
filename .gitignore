@@ -1,0 +1,17 @@
+node_modules/
+node_modules
+data/
+*.log
+.DS_Store
+.env
+.env.local
+.env*
+
+# Deliverables are private content. The repo ships ONLY the synthetic example doc;
+# any real doc you upload/drop into docs/ stays out of git.
+docs/*
+!docs/example.html
+!docs/example.config.json
+!docs/assets/
+docs/assets/*
+!docs/assets/.gitkeep
