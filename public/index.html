@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>html-suggest</title>
+  <title>markmyword</title>
   <style>
     /* Same Inkling / Thinking Machines-style palette + type as the viewer chrome.
        Serif reading face (Iowan Old Style, native on macOS; Georgia fallback) +
@@ -95,27 +95,23 @@
 </head>
 <body>
   <header>
-    <span class="brand">html-suggest</span>
-    <span class="tag">review your deliverables</span>
+    <span class="brand">markmyword</span>
+    <span class="tag">review HTML files</span>
   </header>
 
   <main>
-    <h1>Your deliverables</h1>
-    <p class="lede">Open one to review — edit in place, or switch to Suggesting to
-      leave tracked changes and comments on any element. Version history is kept
-      automatically.</p>
+    <h1>Your files</h1>
+    <p class="lede">Open one to review — edit in place, or suggest changes and
+      comments. History is kept automatically.</p>
 
     <div id="doc-grid" class="doc-grid"><div class="doc-empty">Loading…</div></div>
 
-    <h2>Add a deliverable</h2>
-    <p class="lede" style="font-size:15px">Upload a styled HTML file (the newsletter,
-      a dashboard, a podcast artifact). Its CSS and layout render exactly as-is;
-      any <code>&lt;script&gt;</code> is stripped so the stored file is inert.</p>
+    <h2>Add a file</h2>
 
     <div class="card">
       <label class="field">
-        <span class="lbl">Document id <span class="hint">— letters, numbers, dot, dash, underscore (becomes the URL)</span></span>
-        <input id="doc-id" type="text" placeholder="plugged-in-003" autocomplete="off" spellcheck="false" />
+        <span class="lbl">Name <span class="hint">— letters, numbers, dot, dash, underscore (becomes the URL)</span></span>
+        <input id="doc-id" type="text" placeholder="my-page" autocomplete="off" spellcheck="false" />
       </label>
 
       <label class="field filepick" id="filepick">
@@ -125,7 +121,7 @@
         <input id="doc-file" type="file" accept=".html,text/html" />
       </label>
 
-      <div class="or">— or paste the HTML —</div>
+      <div class="or">— or paste HTML —</div>
 
       <label class="field">
         <textarea id="doc-html" placeholder="<!doctype html>&#10;<html>…"></textarea>
@@ -134,7 +130,7 @@
       <div class="row">
         <label class="chk"><input id="doc-overwrite" type="checkbox" /> Overwrite if it already exists</label>
         <span class="spacer"></span>
-        <button class="primary" id="upload-btn"><span class="ic" id="up-ic"></span>Upload &amp; open</button>
+        <button class="primary" id="upload-btn"><span class="ic" id="up-ic"></span>Add &amp; open</button>
       </div>
 
       <div class="msg" id="msg"></div>

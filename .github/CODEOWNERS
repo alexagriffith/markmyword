@@ -1,0 +1,4 @@
+# Every change to markmyword requires review from the repo owner.
+# Combined with branch protection on `main` (require a PR + 1 approving review),
+# this makes @alexagriffith the sole approved approver for merges.
+*       @alexagriffith

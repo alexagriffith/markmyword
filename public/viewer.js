@@ -1,4 +1,4 @@
-// html-suggest viewer — edit-in-place + version history (MVP).
+// markmyword viewer — edit-in-place + version history (MVP).
 //
 // Flow:
 //   1. GET /api/doc/:id -> { baseHtml, overlay }
@@ -693,6 +693,62 @@ async function boot(overlayOverride) {
   return true;
 }
 
+// Export the reviewed HTML: fetch the base + current overlay, apply the edits to
+// a detached copy (same anchoring/grouping as the viewer), strip our internal
+// data-hs-* attributes, and hand back a clean standalone file. This is the
+// round-trip out — the reviewed document becomes a local file again (drop it in
+// your repo, re-upload, whatever). Edits are applied; suggestions/comments are
+// review-time metadata and are intentionally NOT baked into the exported file.
+async function downloadHtml() {
+  setStatus('', 'Preparing download…');
+  let data;
+  try {
+    const res = await fetch(`/api/doc/${encodeURIComponent(docId)}`);
+    if (!res.ok) throw new Error('fetch failed');
+    data = await res.json();
+  } catch {
+    setStatus('error', 'Download failed');
+    return;
+  }
+
+  // Parse the ORIGINAL document (full doc, not just body) so <head>/styles are
+  // preserved exactly. Apply grouping + anchors on a detached copy.
+  const doc = new DOMParser().parseFromString(data.baseHtml, 'text/html');
+  const body = doc.body;
+
+  // Mirror load-time grouping so grouped passages get the same single anchor.
+  for (const sel of (data.config?.groups || [])) {
+    let matches; try { matches = body.querySelectorAll(sel); } catch { matches = []; }
+    for (const el of matches) el.setAttribute(GROUP_ATTR, '');
+  }
+  const map = await assignAnchors(body);
+
+  // Apply overlay text onto matching anchors (same rules as applyOverlay).
+  for (const [anchor, entry] of Object.entries(data.overlay || {})) {
+    const el = map.get(anchor);
+    if (!el || !entry) continue;                 // stale edits are skipped, not misplaced
+    const text = decodeEntities(entry.text);
+    if (el.hasAttribute(GROUP_ATTR)) writeGroupText(el, text);
+    else el.textContent = text;
+  }
+
+  // Strip every internal attribute we added so the file is clean.
+  for (const el of body.querySelectorAll('*')) {
+    for (const attr of [...el.attributes]) {
+      if (attr.name.startsWith('data-hs-')) el.removeAttribute(attr.name);
+    }
+  }
+
+  const out = '<!doctype html>\n' + doc.documentElement.outerHTML;
+  const blob = new Blob([out], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `${docId}.reviewed.html`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  setStatus('saved', 'Ready');
+}
+
 async function main() {
   docId = getDocId();
   if (!docId) { root.innerHTML = '<div id="hs-empty">No document. Use <code>?doc=&lt;id&gt;</code>.</div>'; setStatus('error', 'No doc'); return; }
@@ -706,6 +762,7 @@ async function main() {
   // Paint the toolbar icons (vendored inline SVG; see icons.js).
   $('#hs-suggest-ic').innerHTML = icon('message', { size: 15 });
   $('#hs-history-ic').innerHTML = icon('clock', { size: 15 });
+  $('#hs-download-ic').innerHTML = icon('download', { size: 15 });
   const modeIcon = $('#hs-mode-icon');
   const paintModeIcon = () => { modeIcon.innerHTML = icon(mode === 'suggest' ? 'message' : 'pencil', { size: 15 }); };
 
@@ -729,6 +786,7 @@ async function main() {
     document.body.classList.toggle('hs-show-suggest');
     if (document.body.classList.contains('hs-show-suggest')) loadSuggestions();
   });
+  $('#hs-download-btn').addEventListener('click', downloadHtml);
 
   // Dismiss the suggest popup / span bar on outside click / Escape.
   document.addEventListener('click', (e) => {

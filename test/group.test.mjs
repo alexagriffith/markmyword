@@ -34,12 +34,12 @@ ok(group.getAttribute('data-hs-grouped') === '1', 'group container marked data-h
 const innerAnchored = [...group.querySelectorAll('[data-hs-anchor]')].filter((e) => e !== group);
 ok(innerAnchored.length === 0, 'inner paragraphs are not individually anchored (group owns them)');
 
-// 3. The 4 paragraphs are all present in the group text.
+// 3. The 3 paragraphs are all present in the group text.
 const shells = groupShells(group);
-ok(shells.length === 4, `group has 4 paragraph shells (got ${shells.length})`);
+ok(shells.length === 3, `group has 3 paragraph shells (got ${shells.length})`);
 const gt = groupText(group);
-ok(gt.includes('This is a sample deliverable') && gt.includes('start to finish'), 'group text spans first..last paragraph');
-ok(gt.split('\n').length === 4, 'group text has 4 newline-separated paragraphs');
+ok(gt.includes('This is a sample document') && gt.includes('start to finish'), 'group text spans first..last paragraph');
+ok(gt.split('\n').length === 3, 'group text has 3 newline-separated paragraphs');
 
 // 4. collectLeaves returns the group once and does not descend into it.
 const leaves = collectLeaves(doc.body);

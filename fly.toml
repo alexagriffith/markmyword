@@ -1,7 +1,7 @@
 # markmyword on Fly.io — one always-on machine + a persistent volume for
 # SQLite and uploaded docs. app name is set at `fly launch` time.
 app = "markmyword"
-primary_region = "iad"
+primary_region = "ewr"
 
 [build]
   dockerfile = "Dockerfile"

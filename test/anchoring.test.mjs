@@ -1,4 +1,4 @@
-// Verifies content-hash anchoring against the synthetic example deliverable,
+// Verifies content-hash anchoring against the synthetic example document,
 // importing the SAME module the browser uses (public/anchoring.js) via jsdom — so
 // the test and production share one implementation (no drift).
 import { readFileSync } from 'node:fs';

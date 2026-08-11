@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>html-suggest · viewer</title>
+  <title>markmyword · viewer</title>
   <style>
     /* ── Typography & palette ──────────────────────────────────────────────
        Modeled on Thinking Machines Lab / "Inkling" (thinkingmachines.ai):
@@ -15,7 +15,7 @@
                     for the author; Georgia is the cross-platform free fallback.
          • sans   — the system grotesque stack (SF / Segoe / Roboto), which is
                     what GT America itself falls back to.
-       IMPORTANT: these styles dress the html-suggest CHROME only (top bar,
+       IMPORTANT: these styles dress the markmyword CHROME only (top bar,
        panels, popups, cards). The rendered deliverable in #hs-doc-root keeps
        its own CSS untouched — we never restyle the document being reviewed. */
     :root {
@@ -148,7 +148,7 @@
 </head>
 <body>
   <div id="hs-bar">
-    <span class="hs-title">html-suggest</span>
+    <span class="hs-title">markmyword</span>
     <span class="hs-doc" id="hs-docname">—</span>
     <span class="hs-spacer"></span>
     <label class="hs-mode-wrap" title="Editing applies changes directly; Suggesting proposes tracked changes">
@@ -160,6 +160,7 @@
     </label>
     <button id="hs-suggest-btn" title="Open suggestions"><span class="hs-btn-ic" id="hs-suggest-ic"></span>Suggestions<span id="hs-suggest-count"></span></button>
     <button id="hs-history-btn" title="Version history"><span class="hs-btn-ic" id="hs-history-ic"></span>History</button>
+    <button id="hs-download-btn" title="Download the reviewed HTML (edits applied)"><span class="hs-btn-ic" id="hs-download-ic"></span>Download</button>
     <span id="hs-status"><span class="dot"></span><span class="txt">Loading…</span></span>
   </div>
   <div id="hs-warn"></div>

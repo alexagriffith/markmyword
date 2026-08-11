@@ -1,6 +1,6 @@
 {
   "groups": [
-    "table[style*=\"border:2px solid #7A4F9C\"] td"
+    ".intro"
   ],
-  "_comment": "groups: CSS selectors whose matched elements are edited as ONE section (data-hs-group applied at load). Kept here, not in the HTML, so formatters can't strip the marker. The selector below targets the INTRO card TD (its table has the purple #7A4F9C border)."
+  "_comment": "groups: CSS selectors whose matched elements are edited as ONE section (data-hs-group applied at load). Kept here, not in the HTML, so formatters can't strip the marker. The selector below targets the INTRO block so its three paragraphs are anchored/edited together."
 }

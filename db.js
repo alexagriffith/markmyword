@@ -1,4 +1,4 @@
-// SQLite persistence for html-suggest.
+// SQLite persistence for markmyword.
 //
 // - documents:         live overlay per doc (one JSON blob, last-write-wins).
 // - document_versions: append-only snapshots for Google-Docs-style history.
@@ -42,6 +42,15 @@ export function openDb(path = process.env.HS_DB_PATH || './data/app.db') {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_sugg_doc ON suggestions(doc_id);
+    -- Who created each doc, so guests are held to one doc each and can delete
+    -- their own. owner_token is the caller's stable id: 'owner' for the site
+    -- owner (OWNER_KEY holder), else the guest's signed-cookie id.
+    CREATE TABLE IF NOT EXISTS doc_owners (
+      doc_id       TEXT PRIMARY KEY,
+      owner_token  TEXT NOT NULL,
+      created_at   TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_owners_token ON doc_owners(owner_token);
   `);
   // Migrations. Both columns support span-level (highlight-a-phrase) suggestions:
   //   span_occ  = which occurrence of `quote` inside the block this suggestion
@@ -166,6 +175,38 @@ export const acceptSuggestion = (db) => db.transaction((id, text, ts) => {
   }
   setSuggestionStatus(db, id, 'accepted');
   return getOverlay(db, s.doc_id); // comment: nothing to apply
+});
+
+// --- doc ownership (guardrails: one doc per guest; owner unlimited) ---
+// Record who created a doc. Called on successful upload.
+export function setDocOwner(db, docId, ownerToken, ts) {
+  db.prepare(`
+    INSERT INTO doc_owners (doc_id, owner_token, created_at) VALUES (?, ?, ?)
+    ON CONFLICT(doc_id) DO UPDATE SET owner_token = excluded.owner_token
+  `).run(docId, ownerToken, ts);
+}
+
+export function getDocOwner(db, docId) {
+  return db.prepare('SELECT owner_token FROM doc_owners WHERE doc_id = ?').get(docId)?.owner_token ?? null;
+}
+
+// How many docs this token currently owns (guest cap = 1; owner is exempt).
+export function countDocsOwnedBy(db, ownerToken) {
+  return db.prepare('SELECT COUNT(*) n FROM doc_owners WHERE owner_token = ?').get(ownerToken).n;
+}
+
+// How many distinct guest tokens own at least one doc (global guest ceiling).
+export function countGuestOwners(db) {
+  return db.prepare("SELECT COUNT(DISTINCT owner_token) n FROM doc_owners WHERE owner_token != 'owner'").get().n;
+}
+
+// Drop all SQLite state for a doc (overlay, versions, suggestions, ownership).
+// The docs/<id>.html file is removed by the caller (filesystem side).
+export const deleteDocData = (db) => db.transaction((docId) => {
+  db.prepare('DELETE FROM documents WHERE doc_id = ?').run(docId);
+  db.prepare('DELETE FROM document_versions WHERE doc_id = ?').run(docId);
+  db.prepare('DELETE FROM suggestions WHERE doc_id = ?').run(docId);
+  db.prepare('DELETE FROM doc_owners WHERE doc_id = ?').run(docId);
 });
 
 // Restore a version: copy its overlay to live AND record the restore as a new

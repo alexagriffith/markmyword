@@ -1,4 +1,4 @@
-// Upload flow against the REAL Express app: list docs, upload a new deliverable,
+// Upload flow against the REAL Express app: list docs, upload a new document,
 // confirm it (a) lands in docs/, (b) is script-stripped, (c) is then loadable via
 // /api/doc, (d) refuses to clobber without overwrite, and (e) rejects bad input.
 // Uploads go to a throwaway id under docs/ and are deleted at the end.

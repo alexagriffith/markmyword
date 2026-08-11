@@ -1,4 +1,4 @@
-// Content-hash anchoring — the correctness core of html-suggest.
+// Content-hash anchoring — the correctness core of markmyword.
 //
 // Each editable "text-bearing leaf block" gets an anchor that is a hash of its
 // NORMALIZED TEXT (not its DOM position). This survives edits to the base

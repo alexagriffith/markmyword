@@ -1,4 +1,4 @@
-// html-suggest server — Express + SQLite, single always-on box.
+// markmyword server — Express + SQLite, single always-on box.
 //
 // Serves the static viewer and a small JSON API. Base document HTML comes from
 // docs/<id>.html (immutable, trusted). Editor edits + version history live in
