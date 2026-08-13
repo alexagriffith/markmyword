@@ -179,5 +179,35 @@ await clickTab('overview');
 texts = editableTexts();
 ok(texts.includes('GLM-5.2-FP8'), 'returning to tab1 re-anchors its content (editable again)');
 
+// --- Edit vs Use mode toggle ------------------------------------------------
+// Editable text units are only contentEditable in 'edit' mode; switching to
+// 'use' makes the doc fully interactive (nothing editable) so its own links/
+// tabs/buttons work; switching back to 'edit' restores editability.
+const ceCount = () => [...win.document.querySelectorAll('[data-hs-editable]')]
+  .filter((el) => el.getAttribute('contenteditable') === 'true').length;
+// The frame only accepts messages whose .source is its embedder (window.parent),
+// so deliver mode changes exactly like the real viewer does: a MessageEvent
+// whose source is our fake PARENT object.
+const sendToFrame = async (data) => {
+  win.dispatchEvent(new win.MessageEvent('message', { data, source: win.parent }));
+  await new Promise((r) => setTimeout(r, 50));
+};
+
+const editableBefore = ceCount();
+ok(editableBefore > 0, 'boot defaults to edit mode: editable units are contentEditable');
+
+await sendToFrame({ type: 'setMode', mode: 'use' });
+ok(ceCount() === 0, "setMode('use') removes contenteditable from every unit (doc fully interactive)");
+
+await sendToFrame({ type: 'setMode', mode: 'edit' });
+ok(ceCount() === editableBefore, "setMode('edit') restores contenteditable on every unit");
+
+// Re-anchoring while in 'use' mode must NOT make freshly-injected text editable.
+await sendToFrame({ type: 'setMode', mode: 'use' });
+await clickTab('quickstart');
+ok(ceCount() === 0, 'content injected while in use mode stays non-editable (no contenteditable)');
+await sendToFrame({ type: 'setMode', mode: 'edit' });
+ok(ceCount() > 0, "switching back to 'edit' after a use-mode tab click re-enables editing");
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

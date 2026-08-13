@@ -1028,10 +1028,15 @@ async function main() {
   $('#hs-history-ic').innerHTML = icon('clock', { size: 15 });
   $('#hs-download-ic').innerHTML = icon('download', { size: 15 });
   const modeIcon = $('#hs-mode-icon');
-  const paintModeIcon = () => { modeIcon.innerHTML = icon(mode === 'suggest' ? 'message' : 'pencil', { size: 15 }); };
+  const modeIconName = () => (mode === 'suggest' ? 'message' : mode === 'use' ? 'cursor' : 'pencil');
+  const paintModeIcon = () => { modeIcon.innerHTML = icon(modeIconName(), { size: 15 }); };
 
-  // Mode selector (Editing / Suggesting), like Google Docs.
+  // Mode selector (Editing / Suggesting / Using), like Google Docs' mode switch.
+  // "Using" is only meaningful for interactive docs (it lets their own links/tabs/
+  // buttons work by disabling our contenteditable), so reveal it only for those.
   const modeSel = $('#hs-mode');
+  const useOpt = $('#hs-mode-use');
+  if (useOpt && interactive) useOpt.hidden = false;
   mode = modeSel.value || 'edit';
   applyMode();
   paintModeIcon();

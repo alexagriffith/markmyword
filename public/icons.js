@@ -18,6 +18,8 @@ const PATHS = {
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   // ↧  jump-to-block (arrow down to line)
   jump: '<path d="M12 17V3"/><path d="m6 11 6 6 6-6"/><path d="M5 21h14"/>',
+  // 🖱  using mode (mouse-pointer-click) — the doc is fully interactive/clickable
+  cursor: '<path d="M14 4.1 12 6"/><path d="m5.1 8-2.9-.8"/><path d="m6 12-1.9 2"/><path d="M7.2 2.2 8 5.1"/><path d="M9.037 9.69a.498.498 0 0 1 .653-.653l11 4.5a.5.5 0 0 1-.074.949l-4.349 1.041a1 1 0 0 0-.74.739l-1.04 4.35a.5.5 0 0 1-.95.074z"/>',
   // ▸  collapsed disclosure (chevron right)
   chevronRight: '<path d="m9 18 6-6-6-6"/>',
   // ▾  expanded disclosure (chevron down)

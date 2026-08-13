@@ -318,6 +318,10 @@
       else { el.removeAttribute('contenteditable'); el.spellcheck = false; }
     });
   }
+  // 'edit' -> all text contenteditable (clicks on links/buttons are intercepted for
+  // caret placement, so the doc's controls are inert while editing — expected).
+  // Anything else ('use'/'view'/'suggest') -> NOT editable, so the doc's OWN links,
+  // tabs and buttons work normally. 'use' is the viewer's "make it interactive" mode.
   function setMode(mode) {
     currentMode = mode === 'edit' ? 'edit' : 'view';
     applyModeToAll(currentMode === 'edit');
