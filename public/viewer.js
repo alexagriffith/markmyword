@@ -41,6 +41,7 @@ let pollTimer = null;
 // anchor we didn't hand out).
 let frame = null;
 let frameAnchors = new Set();
+let frameOrigText = {};   // anchor -> original rendered text (for source-patch)
 let interactive = false;
 
 function getDocId() {
@@ -709,6 +710,9 @@ function onFrameMessage(e) {
   if (!m || typeof m !== 'object') return;
   if (m.type === 'ready') {
     frameAnchors = new Set(Array.isArray(m.anchors) ? m.anchors : []);
+    // Remember each anchor's ORIGINAL rendered text so the download can source-patch
+    // the compressed payload (find old text -> replace with the edit).
+    frameOrigText = (m.origText && typeof m.origText === 'object') ? m.origText : {};
     // Push any existing overlay into the frame so saved edits show on load.
     if (currentOverlay) frame.contentWindow.postMessage({ type: 'applyOverlay', overlay: currentOverlay }, '*');
     frame.contentWindow.postMessage({ type: 'setMode', mode }, '*');
@@ -889,10 +893,12 @@ async function downloadHtml() {
   return downloadOriginal();
 }
 
-// Download the ORIGINAL file with markup-text edits applied. For interactive docs
-// this stays fully interactive (rebuilt from original bytes + its JS); edits to
-// JS-generated text are absent here (those anchors don't exist in the raw markup)
-// and are surfaced only via the snapshot download.
+// Download the ORIGINAL file with edits applied — and still fully interactive.
+// For interactive (self-unpacking) docs, the visible text is regenerated from
+// gzip+base64 payload blobs on every open, so we source-patch those blobs: for each
+// edit we swap the ORIGINAL rendered text (captured by the frame at load) for the
+// new text inside the payload. The result runs exactly like the original and shows
+// the edits. Static docs use the DOMParser rebuild path below.
 async function downloadOriginal() {
   setStatus('', 'Preparing download…');
   let data;
@@ -905,25 +911,38 @@ async function downloadOriginal() {
     return;
   }
 
-  // Interactive doc: rebuild from the ORIGINAL bytes (with its JS intact), NOT
-  // from the stripped copy and NEVER from the frame's live post-JS DOM (that could
-  // bake in anything the doc's runtime injected). We re-parse the original, apply
-  // only stored text edits by anchor, and hand back a clean interactive file.
-  let sourceHtml = data.baseHtml;
+  // Interactive doc: source-patch the compressed payload so the edit survives the
+  // doc's own JS re-render. Build {from,to} from the frame's original text + overlay.
   if (data.hasRaw) {
+    const edits = [];
+    for (const [anchor, entry] of Object.entries(data.overlay || {})) {
+      const from = frameOrigText[anchor];
+      if (typeof from !== 'string' || !from || !entry) continue;
+      const to = decodeEntities(entry.text);
+      if (to !== from) edits.push({ from, to });
+    }
     try {
-      const rres = await fetch(`/api/raw/${encodeURIComponent(docId)}`);
-      if (!rres.ok) throw new Error();
-      sourceHtml = (await rres.json()).rawHtml;
+      const res = await fetch(`/api/patch-download/${encodeURIComponent(docId)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ edits }),
+      });
+      if (!res.ok) throw new Error('patch failed');
+      const out = await res.json();
+      saveHtmlFile(out.html, 'reviewed');
+      // Honest status: some edits may not have matched a payload string (e.g. text
+      // the doc assembles from fragments). Those aren't in the interactive file.
+      const missed = Array.isArray(out.unmatched) ? out.unmatched.length : 0;
+      setStatus('saved', missed ? `Downloaded (${missed} edit(s) not in interactive file — use snapshot)` : 'Ready');
     } catch {
       setStatus('error', 'Download failed');
-      return;
     }
+    return;
   }
 
-  // Parse the ORIGINAL document (full doc, not just body) so <head>/styles/scripts
-  // are preserved exactly. Apply grouping + anchors on a detached copy.
-  const doc = new DOMParser().parseFromString(sourceHtml, 'text/html');
+  // Static doc: parse the base HTML (full doc, so <head>/styles are preserved) and
+  // apply overlay edits by anchor on a detached copy. (Interactive docs returned
+  // above via source-patch.)
+  const doc = new DOMParser().parseFromString(data.baseHtml, 'text/html');
   const body = doc.body;
 
   // Mirror load-time grouping so grouped passages get the same single anchor.
@@ -967,9 +986,9 @@ function openDownloadMenu() {
   menu.setAttribute('role', 'menu');
   menu.innerHTML =
     '<button data-dl="original" role="menuitem">'
-    + '<b>Original interactive</b><span>Fully working file. Text the page builds with JavaScript regenerates on open, so those edits aren’t kept here.</span></button>'
+    + '<b>Interactive + edits</b><span>The fully working file with your text edits patched into it. Best of both — opens and behaves like the original, showing your changes.</span></button>'
     + '<button data-dl="snapshot" role="menuitem">'
-    + '<b>Edited snapshot (static)</b><span>Frozen page with all your edits baked in. No JavaScript — not interactive, but your changes stay put.</span></button>';
+    + '<b>Edited snapshot (static)</b><span>A frozen page with every edit baked in. No JavaScript — not interactive, but guaranteed to match exactly what you see.</span></button>';
   const r = btn.getBoundingClientRect();
   menu.style.cssText =
     'position:fixed;top:' + Math.round(r.bottom + 4) + 'px;right:' + Math.round(window.innerWidth - r.right)

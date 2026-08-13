@@ -218,10 +218,17 @@
     });
 
     wireEditing();
+    // Capture each editable element's ORIGINAL (pre-edit) rendered text, keyed by
+    // anchor. The parent needs it to source-patch the compressed payload on
+    // download: overlay stores the NEW text, but to find-and-replace inside a gzip
+    // blob we must know the exact OLD string the doc's JS rendered.
+    var origText = {};
+    anchorMap.forEach(function (el, anchor) { origText[anchor] = el.textContent; });
     post({
       type: 'ready',
       anchors: Array.from(anchorMap.keys()),
       generated: Array.from(generated),
+      origText: origText,
     });
   }
 

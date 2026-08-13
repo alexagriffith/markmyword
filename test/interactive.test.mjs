@@ -14,6 +14,8 @@ import { assignAnchors } from '../public/anchoring.js';
 import { unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gzipSync, gunzipSync } from 'node:zlib';
+import { findInSource } from '../source-patch.js';
 
 process.env.OWNER_KEY = process.env.OWNER_KEY || 'interactive-test-owner-key';
 const KEY = process.env.OWNER_KEY;
@@ -156,6 +158,55 @@ try {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html: '<p>x</p>' }),
   })).status === 404, 'snapshot of a static (no-raw) doc -> 404');
   await unlink(path.join(DOCS_DIR, `${TMP_ID}-static.html`)).catch(() => {});
+
+  // --- 9. Source-patch download: a self-unpacking bundle stores its text as a
+  //        gzip+base64 payload. /api/patch-download must swap the text INSIDE the
+  //        payload so the downloaded file is still interactive AND edited. ---
+  const incompressible = Array.from({ length: 600 }, (_, i) => ((i * 2654435761) >>> 0).toString(36)).join('');
+  const payload = gzipSync(Buffer.from(JSON.stringify({ model: 'GLM-5.2-FP8', pad: incompressible }))).toString('base64');
+  const bundleHtml = '<!doctype html><html><head><title>bundle</title></head><body>'
+    + '<div id="app"></div>'
+    + '<script>var D="' + payload + '";'
+    + 'document.getElementById("app").textContent=JSON.parse('
+    + 'new TextDecoder().decode(new Uint8Array(atob(D).split("").map(c=>c.charCodeAt(0))))).model;</script>'
+    + '</body></html>';
+  const BID = TMP_ID + '-bundle';
+  await post('/api/upload', { id: BID, html: bundleHtml, overwrite: true });
+
+  // The visible text isn't in the markup, but it IS in the raw payload blob.
+  const bRaw = (await (await fetch(base + `/api/raw/${BID}`)).json()).rawHtml;
+  ok(!bRaw.includes('GLM-5.2-FP8') || findInSource(bRaw, 'GLM-5.2-FP8').contains,
+     'bundle model text lives in the gzip payload, not the markup');
+
+  const pd = await fetch(base + withKey(`/api/patch-download/${BID}`), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ edits: [{ from: 'GLM-5.2-FP8', to: 'GLM-5.2-FP9' }] }),
+  });
+  ok(pd.status === 200, 'POST /api/patch-download -> 200');
+  const pj = await pd.json();
+  ok(pj.applied.length === 1 && pj.applied[0].count === 1, 'one payload edit applied');
+  ok(pj.unmatched.length === 0, 'no unmatched edits');
+  ok(findInSource(pj.html, 'GLM-5.2-FP9').contains === true, 'patched file payload carries the NEW model text');
+  ok(findInSource(pj.html, 'GLM-5.2-FP8').contains === false, 'old model text gone from the payload');
+  ok(/<script/i.test(pj.html), 'patched file keeps its JS (still interactive)');
+
+  // Unmatched edit is reported, file unchanged for it.
+  const pd2 = await fetch(base + withKey(`/api/patch-download/${BID}`), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ edits: [{ from: 'NOT-IN-PAYLOAD', to: 'x' }] }),
+  });
+  const pj2 = await pd2.json();
+  ok(pj2.applied.length === 0 && pj2.unmatched.length === 1, 'unmatched edit reported, none applied');
+
+  // patch-download of a static (no-raw) doc -> 404.
+  await post('/api/upload', { id: BID + '-s', html: '<!doctype html><body><p>x</p></body>', overwrite: true });
+  ok((await fetch(base + withKey(`/api/patch-download/${BID}-s`), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ edits: [] }),
+  })).status === 404, 'patch-download of static doc -> 404');
+
+  await unlink(path.join(DOCS_DIR, `${BID}.html`)).catch(() => {});
+  await unlink(path.join(DOCS_DIR, `${BID}.raw.html`)).catch(() => {});
+  await unlink(path.join(DOCS_DIR, `${BID}-s.html`)).catch(() => {});
 } finally {
   await cleanup();
   server.close();

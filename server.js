@@ -14,6 +14,7 @@ import {
   setDocOwner, getDocOwner, countDocsOwnedBy, countGuestOwners, deleteDocData, ownerMap,
 } from './db.js';
 import { makeGuardrails, LIMITS } from './guardrails.js';
+import { patchSource } from './source-patch.js';
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 
@@ -412,6 +413,34 @@ export function createApp(db, opts = {}) {
     noStore(res);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.json({ ok: true, html: clean });
+  });
+
+  // POST /api/patch-download/:id { edits:[{from,to}] } -> { ok, html, applied, unmatched }
+  // The "original interactive" download for a self-unpacking bundle. The bundle
+  // renders its visible text from gzip+base64 payload blobs, so editing the DOM
+  // doesn't change the file. This decodes those blobs, does an EXACT string swap
+  // (from -> to) inside them, re-encodes, and returns the patched file — still fully
+  // interactive, now carrying the reviewer's edits. Blobs without the target text
+  // are left byte-for-byte untouched; edits whose `from` isn't found come back in
+  // `unmatched` (the client can fall back or warn). We introduce no executable
+  // content: only the doc's own payload text changes.
+  app.post('/api/patch-download/:id', writeLimiter, async (req, res) => {
+    const { id } = req.params;
+    if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
+    const rawHtml = await readRawHtml(id);
+    if (rawHtml == null) return res.status(404).json({ error: 'no_raw' });
+    const edits = Array.isArray(req.body?.edits) ? req.body.edits : [];
+    // Bound the request: cap edit count and per-string length (defense vs abuse).
+    const safeEdits = edits
+      .filter((e) => e && typeof e.from === 'string' && typeof e.to === 'string')
+      .slice(0, 5000)
+      .map((e) => ({ from: e.from.slice(0, MAX_TEXT), to: e.to.slice(0, MAX_TEXT) }));
+    let result;
+    try { result = patchSource(rawHtml, safeEdits); }
+    catch { return res.status(500).json({ error: 'patch_failed' }); }
+    noStore(res);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.json({ ok: true, html: result.html, applied: result.applied, unmatched: result.unmatched });
   });
 
   // POST /api/edit/:id { anchor, text } -> { ok, overlay }
