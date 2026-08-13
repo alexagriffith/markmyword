@@ -47,6 +47,26 @@ async function readDocHtml(id) {
   try { return await readFile(file, 'utf8'); } catch { return null; }
 }
 
+// The un-stripped ORIGINAL bytes of an interactive doc, or null if this doc has
+// no raw copy (it's a plain static deliverable). Only interactive uploads store a
+// .raw.html. This is the source rendered in the sandboxed iframe AND the source
+// the reviewed download is rebuilt from — never the live post-JS DOM.
+async function readRawHtml(id) {
+  if (!isValidDocId(id)) return null;
+  const file = path.join(DOCS_DIR, `${id}.raw.html`);
+  if (!file.startsWith(DOCS_DIR + path.sep)) return null; // defense in depth
+  try { return await readFile(file, 'utf8'); } catch { return null; }
+}
+
+// Whether an interactive raw copy exists for this doc (drives the viewer's choice
+// between the inert inline path and the sandboxed-iframe path).
+async function docHasRaw(id) {
+  if (!isValidDocId(id)) return false;
+  const file = path.join(DOCS_DIR, `${id}.raw.html`);
+  if (!file.startsWith(DOCS_DIR + path.sep)) return false;
+  return access(file, fsConstants.F_OK).then(() => true).catch(() => false);
+}
+
 // Remove <script> elements (and their contents) and inline event-handler
 // attributes from uploaded HTML. The viewer renders via DOMParser (which never
 // executes scripts) AND strips scripts from the parsed DOM, but we also scrub at
@@ -72,6 +92,26 @@ function decodeAttrEntities(s) {
     .replace(/&#(\d+);?/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
     .replace(/&Tab;/gi, '\t').replace(/&NewLine;/gi, '\n')
     .replace(/&colon;/gi, ':');
+}
+
+// Does this HTML contain active content (scripts / inline handlers / javascript:
+// URLs)? Uses the SAME signals stripActiveContent scrubs, so "hasActiveContent"
+// is exactly "stripActiveContent would change something". A doc that trips this
+// is an INTERACTIVE doc: we keep its un-stripped original (docs/<id>.raw.html) and
+// render it in a sandboxed iframe so its own JS can run, contained. A doc that
+// doesn't is a plain styled deliverable and takes the existing inert render path.
+function hasActiveContent(html) {
+  const s = String(html);
+  if (/<script\b/i.test(s)) return true;
+  if (/[\s/"']on[a-z]+\s*=/i.test(s)) return true;
+  // javascript: in href/src, entity-encoding included (mirror the scrub's decode).
+  const jsUrl = /(href|src)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi;
+  let m;
+  while ((m = jsUrl.exec(s)) !== null) {
+    const val = m[2] ?? m[3] ?? m[4] ?? '';
+    if (/^\s*javascript:/i.test(decodeAttrEntities(val))) return true;
+  }
+  return false;
 }
 
 function stripActiveContent(html) {
@@ -102,7 +142,9 @@ async function listDocs() {
   let entries;
   try { entries = await readdir(DOCS_DIR, { withFileTypes: true }); } catch { return []; }
   return entries
-    .filter((e) => e.isFile() && e.name.endsWith('.html'))
+    // .raw.html is the interactive original that shadows <id>.html — not a doc of
+    // its own, so exclude it (else it would list as a phantom "<id>.raw").
+    .filter((e) => e.isFile() && e.name.endsWith('.html') && !e.name.endsWith('.raw.html'))
     .map((e) => e.name.slice(0, -'.html'.length))
     .filter((id) => isValidDocId(id))
     .sort();
@@ -269,15 +311,29 @@ export function createApp(db, opts = {}) {
       }
     }
 
+    // Interactive doc? Keep the un-stripped ORIGINAL alongside the inert copy.
+    // docs/<id>.html is always the scrubbed, safe-to-inline version (fallback +
+    // anchoring base); docs/<id>.raw.html is the original with its JS intact,
+    // rendered only inside a sandboxed iframe and used to rebuild the download.
+    const interactive = hasActiveContent(html);
+    const rawFile = path.join(DOCS_DIR, `${id}.raw.html`);
+    if (!rawFile.startsWith(DOCS_DIR + path.sep)) return res.status(400).json({ error: 'invalid_doc_id' });
     try {
       await writeFile(file, stripActiveContent(html), 'utf8');
+      if (interactive) {
+        await writeFile(rawFile, html, 'utf8');
+      } else {
+        // Overwriting a previously-interactive doc with a static one: drop the
+        // now-stale raw copy so it can't be served/rebuilt.
+        await rm(rawFile, { force: true }).catch(() => {});
+      }
     } catch {
       return res.status(500).json({ error: 'write_failed' });
     }
     // Record ownership (owner docs use the shared 'owner' token).
     setDocOwner(db, id, isOwner ? 'owner' : token, new Date().toISOString());
     noStore(res);
-    res.json({ ok: true, id });
+    res.json({ ok: true, id, interactive });
   });
 
   // DELETE /api/doc/:id — remove a document (file + all SQLite state). Allowed
@@ -293,13 +349,16 @@ export function createApp(db, opts = {}) {
     if (!exists && owner == null) return res.status(404).json({ error: 'doc_not_found' });
     if (!isOwner && owner !== token) return res.status(403).json({ error: 'not_your_doc' });
     await rm(file, { force: true }).catch(() => {});
+    await rm(path.join(DOCS_DIR, `${id}.raw.html`), { force: true }).catch(() => {});
     await rm(path.join(DOCS_DIR, `${id}.config.json`), { force: true }).catch(() => {});
     deleteDocData(db)(id);
     noStore(res);
     res.json({ ok: true, id });
   });
 
-  // GET /api/doc/:id -> { id, baseHtml, overlay }
+  // GET /api/doc/:id -> { id, baseHtml, overlay, config, hasRaw }
+  // hasRaw=true means this is an INTERACTIVE doc with an original kept at
+  // <id>.raw.html — the viewer then uses the sandboxed-iframe path (see /api/raw).
   app.get('/api/doc/:id', readLimiter, async (req, res) => {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
@@ -307,7 +366,52 @@ export function createApp(db, opts = {}) {
     if (baseHtml == null) return res.status(404).json({ error: 'doc_not_found' });
     const config = await readDocConfig(id);
     noStore(res);
-    res.json({ id, baseHtml, overlay: getOverlay(db, id), config });
+    res.json({ id, baseHtml, overlay: getOverlay(db, id), config, hasRaw: await docHasRaw(id) });
+  });
+
+  // GET /api/raw/:id -> the un-stripped ORIGINAL bytes of an interactive doc, as
+  // JSON { id, rawHtml }. This is the ONLY way the viewer gets the runnable HTML,
+  // and it deliberately returns JSON (not a navigable text/html document): the raw
+  // bytes are attacker-controlled, so we never let them be a top-level page on our
+  // origin. The viewer drops them into a sandboxed <iframe srcdoc> (opaque origin),
+  // where the doc's JS can run but can't reach our cookies/APIs.
+  //   Defense in depth: even the JSON response is marked no-store + nosniff and
+  //   carries a CSP sandbox directive, so a browser that somehow renders it as a
+  //   document still gets an opaque, script-only-sandboxed context.
+  app.get('/api/raw/:id', readLimiter, async (req, res) => {
+    const { id } = req.params;
+    if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
+    const rawHtml = await readRawHtml(id);
+    if (rawHtml == null) return res.status(404).json({ error: 'no_raw' });
+    noStore(res);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', 'sandbox allow-scripts');
+    res.json({ id, rawHtml });
+  });
+
+  // POST /api/snapshot/:id { html } -> { ok, html }
+  // The static "edited snapshot" download for interactive docs. The viewer asks the
+  // sandboxed frame to serialize its LIVE (post-JS) DOM and posts that string here.
+  // That string is ATTACKER-CONTROLLED (the frame ran untrusted JS and could have
+  // planted a <script>/on*=/javascript: that would fire when the user later opens
+  // the downloaded file OUTSIDE the sandbox). So we run it through the exact same
+  // stripActiveContent used on upload before handing anything back — the download is
+  // therefore inert. This never touches stored state; it's a pure sanitize service.
+  app.post('/api/snapshot/:id', writeLimiter, async (req, res) => {
+    const { id } = req.params;
+    if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
+    // Only snapshot docs that exist and actually have a runnable original — a static
+    // doc has no live frame to snapshot, so there's nothing to sanitize here.
+    if (!(await docHasRaw(id))) return res.status(404).json({ error: 'no_raw' });
+    const { html } = req.body || {};
+    if (typeof html !== 'string' || html.length === 0) return res.status(400).json({ error: 'invalid_html' });
+    if (Buffer.byteLength(html, 'utf8') > MAX_DOC_BYTES) {
+      return res.status(413).json({ error: 'too_large', maxBytes: MAX_DOC_BYTES });
+    }
+    const clean = stripActiveContent(html);
+    noStore(res);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.json({ ok: true, html: clean });
   });
 
   // POST /api/edit/:id { anchor, text } -> { ok, overlay }

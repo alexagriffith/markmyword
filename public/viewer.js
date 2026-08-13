@@ -34,6 +34,15 @@ let inflight = 0;
 let suggestions = [];               // open suggestions for this doc
 let pollTimer = null;
 
+// Interactive (JS) docs render inside a sandboxed iframe instead of inline. When
+// set, `frame` is that iframe and `frameAnchors` is the set of editable anchors
+// the in-frame controller reported (used to validate edit messages before we
+// forward them to /api/edit — the frame runs untrusted JS, so we don't trust an
+// anchor we didn't hand out).
+let frame = null;
+let frameAnchors = new Set();
+let interactive = false;
+
 function getDocId() {
   const p = new URLSearchParams(location.search);
   if (p.get('doc')) return p.get('doc');
@@ -170,6 +179,13 @@ function applyMode() {
   const suggesting = mode === 'suggest';
   document.body.classList.toggle('hs-edit', editing);
   document.body.classList.toggle('hs-suggest', suggesting);
+  // Interactive docs live in the sandboxed frame; drive editability across the
+  // bridge. (Suggest/comment parity in the frame is phase 2 — for now the frame
+  // supports edit mode; suggesting simply disables in-frame editing.)
+  if (interactive) {
+    if (frame && frame.contentWindow) frame.contentWindow.postMessage({ type: 'setMode', mode }, '*');
+    return;
+  }
   for (const el of anchorMap.values()) {
     if (editing) { el.setAttribute('contenteditable', 'true'); el.spellcheck = true; }
     else { el.removeAttribute('contenteditable'); el.spellcheck = false; }
@@ -647,6 +663,131 @@ function startPolling() {
   pollTimer = setInterval(loadSuggestions, 5000);
 }
 
+// --- interactive (sandboxed-iframe) render path ------------------------------
+//
+// An interactive doc (its own JS builds the page) can't be injected into our page
+// DOM — that would run untrusted script at our origin. Instead we run it inside an
+// <iframe sandbox="allow-scripts"> (opaque origin): the doc's JS runs but can't
+// reach our cookies, APIs, or parent DOM. A trusted in-frame controller
+// (frame-controller.js) makes the doc's ORIGINAL-markup text editable, marks
+// JS-generated text read-only, and bridges edits back here via postMessage.
+
+let frameControllerSrc = null; // cached controller source (fetched once)
+
+async function getFrameControllerSrc() {
+  if (frameControllerSrc != null) return frameControllerSrc;
+  frameControllerSrc = await fetch('/frame-controller.js').then((r) => r.text());
+  return frameControllerSrc;
+}
+
+// Build the srcdoc for the sandboxed frame: the doc's original HTML with our
+// controller + its inputs inlined. We inline (not <script src>) so the opaque-
+// origin frame is fully self-contained and needs nothing from our origin at runtime.
+function buildSrcdoc(rawHtml, controllerSrc, id) {
+  // JSON.stringify safely encodes the raw HTML + id as JS string literals for the
+  // bootstrap globals the controller reads. </script> in the doc can't break out
+  // of OUR injected <script> because it lives in string literals we control; but
+  // to be safe against a literal `</script>` in rawHtml closing our tag, we escape
+  // the sequence in the JSON we emit.
+  const safe = (v) => JSON.stringify(v).replace(/<\/(script)/gi, '<\\/$1');
+  const boot =
+    `<script>window.__MMW_RAW__=${safe(rawHtml)};window.__MMW_DOC__=${safe(id)};</script>`;
+  // Controller runs after the doc so the doc's own load handlers fire first.
+  const controller = `<script>${controllerSrc}</script>`;
+  // Prepend the bootstrap (globals must exist before the doc's scripts, harmless
+  // there) and append the controller at end of body via string concat.
+  return boot + String(rawHtml) + controller;
+}
+
+// Handle a message from the sandboxed frame. The frame runs untrusted JS next to
+// our controller, so validate: it must come from OUR frame, be an object, and any
+// edit must target an anchor the controller reported (no anchor-injection into a
+// block we never surfaced).
+function onFrameMessage(e) {
+  if (!frame || e.source !== frame.contentWindow) return;
+  const m = e.data;
+  if (!m || typeof m !== 'object') return;
+  if (m.type === 'ready') {
+    frameAnchors = new Set(Array.isArray(m.anchors) ? m.anchors : []);
+    // Push any existing overlay into the frame so saved edits show on load.
+    if (currentOverlay) frame.contentWindow.postMessage({ type: 'applyOverlay', overlay: currentOverlay }, '*');
+    frame.contentWindow.postMessage({ type: 'setMode', mode }, '*');
+    setStatus('saved', 'Ready');
+    return;
+  }
+  if (m.type === 'edit') {
+    if (typeof m.anchor !== 'string' || !frameAnchors.has(m.anchor)) return; // reject unknown anchor
+    if (typeof m.text !== 'string') return;
+    frameEdit(m.anchor, m.text);
+    return;
+  }
+  if (m.type === 'snapshot') {
+    // Response to a serialize request. The string is UNTRUSTED (frame ran the doc's
+    // JS); the resolver hands it to /api/snapshot for server-side sanitizing.
+    if (typeof m.html === 'string' && snapshotResolve) { snapshotResolve(m.html); }
+    return;
+  }
+}
+
+// Ask the frame to serialize its live DOM; resolves with the (still untrusted) HTML.
+let snapshotResolve = null;
+function requestFrameSnapshot() {
+  return new Promise((resolve, reject) => {
+    if (!frame || !frame.contentWindow) return reject(new Error('no frame'));
+    let done = false;
+    snapshotResolve = (html) => { if (!done) { done = true; snapshotResolve = null; resolve(html); } };
+    frame.contentWindow.postMessage({ type: 'serialize' }, '*');
+    setTimeout(() => { if (!done) { done = true; snapshotResolve = null; reject(new Error('timeout')); } }, 8000);
+  });
+}
+
+let currentOverlay = null; // last overlay fetched, so a late 'ready' can apply it
+
+// Debounced save of a frame edit (mirrors scheduleSave, but text already in hand).
+function frameEdit(anchor, text) {
+  pending.set(anchor, text);
+  setStatus('dirty', 'Editing…');
+  if (saveTimers.has(anchor)) clearTimeout(saveTimers.get(anchor));
+  saveTimers.set(anchor, setTimeout(() => saveBlock(anchor), 800));
+}
+
+// Render an interactive doc into a sandboxed iframe. Returns true on success.
+async function bootInteractive(data) {
+  interactive = true;
+  currentOverlay = data.overlay || {};
+  // Fetch the original bytes + controller in parallel.
+  let raw, controllerSrc;
+  try {
+    [raw, controllerSrc] = await Promise.all([
+      fetch(`/api/raw/${encodeURIComponent(docId)}`).then((r) => { if (!r.ok) throw new Error(); return r.json(); }).then((j) => j.rawHtml),
+      getFrameControllerSrc(),
+    ]);
+  } catch {
+    root.innerHTML = '<div id="hs-empty">Failed to load interactive document.</div>';
+    setStatus('error', 'Load failed');
+    return false;
+  }
+
+  root.innerHTML = '';
+  const f = document.createElement('iframe');
+  // allow-scripts ONLY. NEVER add allow-same-origin (that would let the frame drop
+  // its sandbox and reach our cookies/APIs). No popups/forms/downloads/top-nav.
+  f.setAttribute('sandbox', 'allow-scripts');
+  f.setAttribute('title', 'Reviewed document (sandboxed)');
+  f.style.cssText = 'width:100%;height:calc(100vh - var(--hs-bar-h));border:0;display:block;background:#fff;';
+  f.srcdoc = buildSrcdoc(raw, controllerSrc, docId);
+  root.appendChild(f);
+  frame = f;
+
+  window.addEventListener('message', onFrameMessage);
+  // Honest banner: interactive docs edit markup text only.
+  warn('This document runs its own JavaScript, so it’s shown in a secure sandbox. '
+    + 'You can edit text that’s part of the page; text the page generates with JavaScript is shown but not editable here. '
+    + 'Download gives you the original interactive file with your text edits.');
+  setStatus('', 'Rendering…');
+  return true;
+}
+
 // (Re)render + anchor + apply a given overlay. Used on first load and after restore.
 async function boot(overlayOverride) {
   let data;
@@ -661,6 +802,8 @@ async function boot(overlayOverride) {
     data = await res.json();
     data.overlay = overlayOverride;
   }
+  // Interactive (JS) doc -> sandboxed-iframe path (skips the inline pipeline).
+  if (data.hasRaw) return bootInteractive(data);
   renderBaseHtml(data.baseHtml);
   // Apply block-grouping from per-doc config BEFORE anchoring, so grouped
   // containers are anchored as one unit. (Config lives in docs/<id>.config.json
@@ -706,7 +849,51 @@ async function boot(overlayOverride) {
 // round-trip out — the reviewed document becomes a local file again (drop it in
 // your repo, re-upload, whatever). Edits are applied; suggestions/comments are
 // review-time metadata and are intentionally NOT baked into the exported file.
+// Trigger a browser download of an HTML string.
+function saveHtmlFile(out, suffix) {
+  const blob = new Blob([out], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = `${docId}.${suffix}.html`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Static "edited snapshot" of an interactive doc: freeze the LIVE (post-JS) page
+// with the reviewer's edits into inert HTML. The frame serializes its own DOM; the
+// SERVER sanitizes it (stripActiveContent) so the downloaded file has no runnable
+// JS. Not interactive by design — the JS is what made it interactive, and it's
+// stripped so it can't re-render over your edits or execute on open.
+async function downloadSnapshot() {
+  setStatus('', 'Preparing snapshot…');
+  try {
+    const liveHtml = await requestFrameSnapshot();      // untrusted (frame ran doc JS)
+    const res = await fetch(`/api/snapshot/${encodeURIComponent(docId)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ html: liveHtml }),
+    });
+    if (!res.ok) throw new Error('snapshot failed');
+    const { html } = await res.json();
+    saveHtmlFile(html, 'snapshot');
+    setStatus('saved', 'Ready');
+  } catch {
+    setStatus('error', 'Snapshot failed');
+  }
+}
+
+// Interactive-doc dispatcher: two choices, since for a self-unpacking bundle you
+// can't have both an interactive file AND baked-in edits at once.
 async function downloadHtml() {
+  const data0 = await fetch(`/api/doc/${encodeURIComponent(docId)}`).then((r) => r.ok ? r.json() : null).catch(() => null);
+  if (data0 && data0.hasRaw) { openDownloadMenu(); return; }
+  return downloadOriginal();
+}
+
+// Download the ORIGINAL file with markup-text edits applied. For interactive docs
+// this stays fully interactive (rebuilt from original bytes + its JS); edits to
+// JS-generated text are absent here (those anchors don't exist in the raw markup)
+// and are surfaced only via the snapshot download.
+async function downloadOriginal() {
   setStatus('', 'Preparing download…');
   let data;
   try {
@@ -718,9 +905,25 @@ async function downloadHtml() {
     return;
   }
 
-  // Parse the ORIGINAL document (full doc, not just body) so <head>/styles are
-  // preserved exactly. Apply grouping + anchors on a detached copy.
-  const doc = new DOMParser().parseFromString(data.baseHtml, 'text/html');
+  // Interactive doc: rebuild from the ORIGINAL bytes (with its JS intact), NOT
+  // from the stripped copy and NEVER from the frame's live post-JS DOM (that could
+  // bake in anything the doc's runtime injected). We re-parse the original, apply
+  // only stored text edits by anchor, and hand back a clean interactive file.
+  let sourceHtml = data.baseHtml;
+  if (data.hasRaw) {
+    try {
+      const rres = await fetch(`/api/raw/${encodeURIComponent(docId)}`);
+      if (!rres.ok) throw new Error();
+      sourceHtml = (await rres.json()).rawHtml;
+    } catch {
+      setStatus('error', 'Download failed');
+      return;
+    }
+  }
+
+  // Parse the ORIGINAL document (full doc, not just body) so <head>/styles/scripts
+  // are preserved exactly. Apply grouping + anchors on a detached copy.
+  const doc = new DOMParser().parseFromString(sourceHtml, 'text/html');
   const body = doc.body;
 
   // Mirror load-time grouping so grouped passages get the same single anchor.
@@ -747,13 +950,48 @@ async function downloadHtml() {
   }
 
   const out = '<!doctype html>\n' + doc.documentElement.outerHTML;
-  const blob = new Blob([out], { type: 'text/html' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = `${docId}.reviewed.html`;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
+  saveHtmlFile(out, 'reviewed');
   setStatus('saved', 'Ready');
+}
+
+// Two-choice download menu for interactive docs. A self-unpacking bundle can't be
+// both interactive AND carry baked-in edits (its JS regenerates text on open), so
+// the reviewer picks per download.
+let dlMenuEl = null;
+function closeDownloadMenu() { if (dlMenuEl) { dlMenuEl.remove(); dlMenuEl = null; } }
+function openDownloadMenu() {
+  closeDownloadMenu();
+  const btn = $('#hs-download-btn');
+  const menu = document.createElement('div');
+  menu.id = 'hs-dl-menu';
+  menu.setAttribute('role', 'menu');
+  menu.innerHTML =
+    '<button data-dl="original" role="menuitem">'
+    + '<b>Original interactive</b><span>Fully working file. Text the page builds with JavaScript regenerates on open, so those edits aren’t kept here.</span></button>'
+    + '<button data-dl="snapshot" role="menuitem">'
+    + '<b>Edited snapshot (static)</b><span>Frozen page with all your edits baked in. No JavaScript — not interactive, but your changes stay put.</span></button>';
+  const r = btn.getBoundingClientRect();
+  menu.style.cssText =
+    'position:fixed;top:' + Math.round(r.bottom + 4) + 'px;right:' + Math.round(window.innerWidth - r.right)
+    + 'px;z-index:1000;background:#fff;border:1px solid #ccc;border-radius:8px;'
+    + 'box-shadow:0 4px 16px rgba(0,0,0,0.18);width:300px;overflow:hidden;';
+  for (const b of menu.querySelectorAll('button')) {
+    b.style.cssText = 'display:block;width:100%;text-align:left;border:0;border-bottom:1px solid #eee;'
+      + 'background:#fff;padding:10px 12px;cursor:pointer;font:inherit;';
+    b.querySelector('b').style.cssText = 'display:block;font-size:13px;color:#111;';
+    b.querySelector('span').style.cssText = 'display:block;font-size:11.5px;color:#666;margin-top:2px;line-height:1.35;';
+    b.addEventListener('mouseenter', () => { b.style.background = '#f5f5f5'; });
+    b.addEventListener('mouseleave', () => { b.style.background = '#fff'; });
+  }
+  menu.addEventListener('click', (e) => {
+    const choice = e.target.closest('button')?.getAttribute('data-dl');
+    if (!choice) return;
+    closeDownloadMenu();
+    if (choice === 'original') downloadOriginal();
+    else if (choice === 'snapshot') downloadSnapshot();
+  });
+  document.body.appendChild(menu);
+  dlMenuEl = menu;
 }
 
 async function main() {
@@ -795,12 +1033,13 @@ async function main() {
   });
   $('#hs-download-btn').addEventListener('click', downloadHtml);
 
-  // Dismiss the suggest popup / span bar on outside click / Escape.
+  // Dismiss the suggest popup / span bar / download menu on outside click / Escape.
   document.addEventListener('click', (e) => {
+    if (dlMenuEl && !dlMenuEl.contains(e.target) && !e.target.closest('#hs-download-btn')) closeDownloadMenu();
     if (popupEl && !popupEl.contains(e.target) && !e.target.closest('[data-hs-anchor]')) closeSuggestPopup();
     if (spanBarEl && !spanBarEl.contains(e.target)) closeSpanBar();
   });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeSuggestPopup(); closeSpanBar(); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeSuggestPopup(); closeSpanBar(); closeDownloadMenu(); } });
 
   // Load suggestions once + poll (so accepted/new suggestions appear "live enough").
   await loadSuggestions();

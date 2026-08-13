@@ -19,6 +19,7 @@ const { createApp } = await import('../server.js');
 const DOCS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'docs');
 const TMP_ID = 'zz-upload-test-doc'; // sorts last; unmistakably a test artifact
 const TMP_FILE = path.join(DOCS_DIR, `${TMP_ID}.html`);
+const TMP_RAW_FILE = path.join(DOCS_DIR, `${TMP_ID}.raw.html`);
 const TMP_ASSET = 'zz-upload-test-asset.png'; // test image artifact
 const TMP_ASSET_FILE = path.join(DOCS_DIR, 'assets', TMP_ASSET);
 
@@ -34,7 +35,7 @@ const withKey = (u) => u + (u.includes('?') ? '&' : '?') + 'key=' + encodeURICom
 const post = (u, body) => fetch(base + withKey(u), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
 const get = (u) => fetch(base + withKey(u)).then((r) => r.json());
 
-async function cleanup() { await unlink(TMP_FILE).catch(() => {}); await unlink(TMP_ASSET_FILE).catch(() => {}); }
+async function cleanup() { await unlink(TMP_FILE).catch(() => {}); await unlink(TMP_RAW_FILE).catch(() => {}); await unlink(TMP_ASSET_FILE).catch(() => {}); }
 await cleanup(); // in case a prior aborted run left it behind
 
 try {
@@ -86,6 +87,53 @@ try {
   ok((await post('/api/upload', { id: '../evil', html: '<p>x</p>' })).status === 400, 'traversal id -> 400');
   ok((await post('/api/upload', { id: 'good-id', html: '' })).status === 400, 'empty html -> 400');
   ok((await post('/api/upload', { id: 'good-id', html: 'just plain text no tags' })).status === 400, 'non-HTML -> 400');
+
+  // 5b. Interactive doc: an upload WITH scripts keeps an un-stripped .raw.html and
+  //     reports hasRaw; the served base is still inert; /api/raw returns the
+  //     original with its <script> intact and hardened headers; overwriting with a
+  //     STATIC doc drops the raw copy; DELETE removes both files.
+  const interactiveHtml = '<!doctype html><html><head><title>app</title></head>'
+    + '<body><h1>Live heading</h1><p>Static copy</p>'
+    + '<div id="app"></div>'
+    + '<script>document.getElementById("app").textContent = "built by JS";</script>'
+    + '</body></html>';
+  let ir = await post('/api/upload', { id: TMP_ID, html: interactiveHtml, overwrite: true });
+  const ij = await ir.json();
+  ok(ir.status === 200 && ij.interactive === true, 'interactive upload -> 200 with interactive:true');
+  const rawOnDisk = await readFile(TMP_RAW_FILE, 'utf8').catch(() => null);
+  ok(rawOnDisk !== null && /<script/i.test(rawOnDisk), 'raw copy kept with <script> intact');
+  const baseOnDisk = await readFile(TMP_FILE, 'utf8');
+  ok(!/<script/i.test(baseOnDisk), 'inert base copy still has NO <script>');
+
+  const docMeta = await get(`/api/doc/${TMP_ID}`);
+  ok(docMeta.hasRaw === true, 'GET /api/doc reports hasRaw:true for interactive doc');
+
+  const rawRes = await fetch(`${base}/api/raw/${TMP_ID}`);
+  ok(rawRes.status === 200, 'GET /api/raw -> 200');
+  ok(rawRes.headers.get('content-security-policy') === 'sandbox allow-scripts', '/api/raw sends CSP sandbox allow-scripts');
+  ok(rawRes.headers.get('x-content-type-options') === 'nosniff', '/api/raw sends nosniff');
+  const rawJson = await rawRes.json();
+  ok(/<script/i.test(rawJson.rawHtml) && rawJson.rawHtml.includes('built by JS'), '/api/raw returns original bytes with JS');
+
+  // Overwrite with a STATIC doc -> raw copy must be removed + hasRaw false.
+  await post('/api/upload', { id: TMP_ID, html: '<!doctype html><body><p>now static</p></body>', overwrite: true });
+  const stillRaw = await readFile(TMP_RAW_FILE, 'utf8').then(() => true).catch(() => false);
+  ok(!stillRaw, 'overwriting interactive doc with static one drops the .raw.html');
+  ok((await get(`/api/doc/${TMP_ID}`)).hasRaw === false, 'hasRaw false after static overwrite');
+  ok((await fetch(`${base}/api/raw/${TMP_ID}`)).status === 404, '/api/raw -> 404 once raw copy is gone');
+
+  // Re-upload interactive, then DELETE, and confirm both files removed.
+  await post('/api/upload', { id: TMP_ID, html: interactiveHtml, overwrite: true });
+  ok(await readFile(TMP_RAW_FILE, 'utf8').then(() => true).catch(() => false), 'raw copy present again before delete');
+  // DELETE promotes to owner via the key query param (same as the other calls).
+  const delRes = await fetch(base + withKey(`/api/doc/${TMP_ID}`), { method: 'DELETE' });
+  ok(delRes.status === 200, 'DELETE interactive doc -> 200');
+  ok(!(await readFile(TMP_FILE, 'utf8').then(() => true).catch(() => false)), 'DELETE removed base .html');
+  ok(!(await readFile(TMP_RAW_FILE, 'utf8').then(() => true).catch(() => false)), 'DELETE removed .raw.html');
+  // Non-interactive listing must not show a phantom "<id>.raw" entry.
+  await post('/api/upload', { id: TMP_ID, html: interactiveHtml, overwrite: true });
+  const listAfter = (await get('/api/docs')).docs;
+  ok(!listAfter.includes(`${TMP_ID}.raw`), 'listing has no phantom <id>.raw entry');
 
   // 6. Asset upload: a doc's referenced image travels via /api/upload-asset.
   //    1x1 transparent PNG.

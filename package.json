@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node test/anchoring.test.mjs && node test/formats.test.mjs && node test/group.test.mjs && node test/api.test.mjs && node test/suggestions.test.mjs && node test/upload.test.mjs && node test/guardrails.test.mjs"
+    "test": "node test/anchoring.test.mjs && node test/formats.test.mjs && node test/group.test.mjs && node test/api.test.mjs && node test/suggestions.test.mjs && node test/upload.test.mjs && node test/interactive.test.mjs && node test/guardrails.test.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
