@@ -56,6 +56,27 @@ function warn(msg) {
   warnEl.textContent = msg; warnEl.className = 'show';
 }
 
+// Transient toast (bottom-center) for one-off notices that must NOT clobber the
+// persistent sandbox banner — e.g. clicking a nav link to a companion file that
+// wasn't uploaded. Auto-dismisses; a repeat message just resets the timer.
+let flashTimer = null;
+function flashNote(msg) {
+  let el = document.getElementById('hs-flash-note');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'hs-flash-note';
+    el.style.cssText = 'position:fixed;left:50%;bottom:22px;transform:translateX(-50%);'
+      + 'background:#282828;color:#faf9f5;font:13px/1.4 var(--hs-sans,sans-serif);'
+      + 'padding:9px 15px;border-radius:8px;box-shadow:0 6px 20px rgba(0,0,0,.28);'
+      + 'z-index:2000;max-width:80vw;opacity:0;transition:opacity .15s;pointer-events:none;';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = '1';
+  if (flashTimer) clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => { el.style.opacity = '0'; }, 3200);
+}
+
 // Overlay values are HTML-escaped text; decode to a plain string for textContent.
 function decodeEntities(escaped) {
   const t = document.createElement('textarea');
@@ -723,6 +744,17 @@ function onFrameMessage(e) {
     if (typeof m.anchor !== 'string' || !frameAnchors.has(m.anchor)) return; // reject unknown anchor
     if (typeof m.text !== 'string') return;
     frameEdit(m.anchor, m.text);
+    return;
+  }
+  if (m.type === 'navBlocked') {
+    // The doc tried to navigate the frame to a companion file that isn't part of
+    // this upload (or a dead href="#"). We blocked it so the frame can't load the
+    // app inside itself. Tell the reviewer plainly instead of showing nothing.
+    const href = typeof m.href === 'string' ? m.href : '';
+    const isDead = href === '' || href === '#';
+    flashNote(isDead
+      ? 'That link doesn’t go anywhere in this file.'
+      : 'That page isn’t part of this upload — only this document was shared.');
     return;
   }
   if (m.type === 'snapshot') {

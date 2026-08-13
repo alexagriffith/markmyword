@@ -260,6 +260,37 @@
       var anchor = el.getAttribute('data-hs-anchor');
       post({ type: 'edit', anchor: anchor, text: el.textContent });
     });
+    blockFrameNavigation();
+  }
+
+  // Standalone docs often carry top-nav links to COMPANION files that were never
+  // uploaded (e.g. <a href="AI Hub Catalog.dc.html">) or dead <a href="#"> stubs.
+  // Clicking one would navigate THIS frame to that URL. Because the frame is an
+  // opaque-origin srcdoc, a relative href resolves against OUR origin and loads the
+  // markmyword app INSIDE the frame — the confusing "duplicate bar + Loading
+  // document…" the user saw. The other views simply aren't in this file, so there's
+  // nothing to show; the honest behavior is to not navigate at all. We intercept in
+  // the CAPTURE phase (before the doc's own handlers) and cancel any click on an <a>
+  // that would leave the current srcdoc document. Same-document fragment links
+  // (href="#id") and links the doc drives purely via JS are left untouched.
+  function blockFrameNavigation() {
+    document.addEventListener('click', function (e) {
+      var a = e.target && e.target.closest && e.target.closest('a[href]');
+      if (!a) return;
+      var raw = a.getAttribute('href') || '';
+      // Pure in-page fragment or JS-scheme handler: let the doc do its thing.
+      if (raw === '' || raw.charAt(0) === '#' || /^javascript:/i.test(raw)) return;
+      var here, dest;
+      try { here = document.location.href; dest = a.href; } catch (_) { return; }
+      // Same document + only a fragment differs -> in-page anchor, allow it.
+      var stripHash = function (u) { var i = u.indexOf('#'); return i === -1 ? u : u.slice(0, i); };
+      if (stripHash(dest) === stripHash(here)) return;
+      // Anything else navigates the frame away from the doc -> block it. There's no
+      // companion view bundled here, so navigating only loads a phantom page.
+      e.preventDefault();
+      e.stopPropagation();
+      post({ type: 'navBlocked', href: raw });
+    }, true); // capture: run before the doc's own click handlers
   }
 
   // Serialize the LIVE (post-JS) DOM for the static snapshot download. We return raw

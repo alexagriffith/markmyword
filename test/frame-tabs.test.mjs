@@ -209,5 +209,46 @@ ok(ceCount() === 0, 'content injected while in use mode stays non-editable (no c
 await sendToFrame({ type: 'setMode', mode: 'edit' });
 ok(ceCount() > 0, "switching back to 'edit' after a use-mode tab click re-enables editing");
 
+// --- Navigation guard --------------------------------------------------------
+// Standalone docs carry top-nav links to COMPANION files that weren't uploaded
+// (href="Other.html") or dead stubs (href="#"). Clicking one would navigate the
+// opaque-origin frame to OUR origin and load markmyword inside itself (the
+// "duplicate bar + Loading document…" bug). The guard must:
+//   1. BLOCK a click that would leave this document (cross-file / off-origin), and
+//   2. NOT block an in-page tab that swaps in content ALREADY in the file — so
+//      "if the linked content WERE in the file, it would work" holds.
+const navMsgs = () => posted.filter((m) => m && m.type === 'navBlocked');
+
+// (1) In-page JS-driven tab: content is in the file, a click swaps it in (the
+// doc's own tab buttons run JS to inject a panel). The guard must leave these
+// alone AND the injected content must become editable — proving that IF the
+// linked content WERE in the file, it would work.
+const before = navMsgs().length;
+await clickTab('notes');
+ok(navMsgs().length === before, 'in-page JS tab click is NOT reported as blocked');
+ok(editableTexts().includes('Whole-group restarts.'), 'in-page tab content swapped in and became editable (would work if in the file)');
+
+// (2) Cross-file companion link (the "Model catalog" case) -> blocked.
+const beforeX = navMsgs().length;
+const xlink = win.document.createElement('a');
+xlink.setAttribute('href', 'AI Hub Catalog.dc.html');
+xlink.textContent = 'Model catalog';
+win.document.body.appendChild(xlink);
+const xEvt = new win.MouseEvent('click', { bubbles: true, cancelable: true });
+xlink.dispatchEvent(xEvt);
+await new Promise((r) => setTimeout(r, 20));
+ok(navMsgs().length > beforeX, 'cross-file companion link click is blocked (no phantom navigation)');
+ok(xEvt.defaultPrevented, 'the cross-file click had its default (navigation) prevented');
+
+// (3) Same-page fragment link (href="#realid") -> allowed (not blocked).
+const beforeFrag = navMsgs().length;
+const frag = win.document.createElement('a');
+frag.setAttribute('href', '#panel');
+frag.textContent = 'Jump to panel';
+win.document.body.appendChild(frag);
+frag.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
+await new Promise((r) => setTimeout(r, 20));
+ok(navMsgs().length === beforeFrag, 'same-page fragment link is allowed (not blocked)');
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
