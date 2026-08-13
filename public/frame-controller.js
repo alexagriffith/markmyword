@@ -156,9 +156,43 @@
     return true;
   }
 
+  // Some docs put loose text DIRECTLY inside a wrapper that ALSO has element
+  // children — e.g. <div>Provided by · Red Hat AI Validated Models<a>zai-org</a></div>.
+  // The wrapper isn't an editable unit (its child <a> owns text), so that loose
+  // "Provided by …" run would be orphaned and uneditable. Wrap each such loose text
+  // node in <span data-hs-straytext> so it becomes its own innermost text unit,
+  // WITHOUT swallowing the sibling elements. Idempotent: skips nodes already wrapped.
+  function wrapStrayText(container) {
+    // Snapshot candidates first (we mutate the tree as we go).
+    var wrappers = [];
+    var all = container.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (SKIP_TAGS.has(el.tagName.toLowerCase())) continue;
+      if (el.children.length === 0) continue;         // pure leaf: handled normally
+      if (!hasDirectText(el)) continue;               // no loose text of its own
+      if (el.hasAttribute('data-hs-straytext')) continue;
+      wrappers.push(el);
+    }
+    for (var w = 0; w < wrappers.length; w++) {
+      var parent = wrappers[w];
+      var kids = Array.prototype.slice.call(parent.childNodes);
+      for (var k = 0; k < kids.length; k++) {
+        var n = kids[k];
+        if (n.nodeType !== 3) continue;               // element/comment: leave
+        if (n.textContent.trim() === '') continue;    // whitespace-only: leave
+        var span = document.createElement('span');
+        span.setAttribute('data-hs-straytext', '1');
+        parent.replaceChild(span, n);
+        span.appendChild(n);
+      }
+    }
+  }
+
   // Collect innermost text-bearing elements anywhere under container, in document
   // order. querySelectorAll('*') then filter keeps document order and dedupes.
   function collectLeaves(container) {
+    wrapStrayText(container);
     var out = [];
     var all = container.querySelectorAll('*');
     for (var i = 0; i < all.length; i++) {
@@ -278,45 +312,106 @@
     t.innerHTML = String(escaped == null ? '' : escaped);
     return t.value;
   }
-  function setMode(mode) {
-    var editing = mode === 'edit';
+  function applyModeToAll(editing) {
     anchorMap.forEach(function (el) {
       if (editing) { el.setAttribute('contenteditable', 'true'); el.spellcheck = true; }
       else { el.removeAttribute('contenteditable'); el.spellcheck = false; }
     });
   }
+  function setMode(mode) {
+    currentMode = mode === 'edit' ? 'edit' : 'view';
+    applyModeToAll(currentMode === 'edit');
+  }
 
-  // ---- boot -------------------------------------------------------------------
+  // ---- boot / rescan ----------------------------------------------------------
+  var origSet = new Set();     // anchors present in the ORIGINAL markup bytes
+  var origText = {};           // anchor -> original rendered text (for source-patch)
+  var currentMode = 'edit';    // last mode the parent asked for
+  var scanning = false;        // re-entrancy guard while (re)anchoring
+  var rescanPending = false;   // a mutation arrived mid-scan; scan again after
+
+  // Anchor everything currently in the live DOM and make it editable. Runs on boot
+  // AND after the doc's own JS mutates the DOM (e.g. a tab/section is clicked and
+  // new content is injected) — so text that only appears after interaction becomes
+  // editable too. Idempotent: elements already anchored keep their anchor; only
+  // newly-appeared runs are added. Posts an updated 'ready' with the full anchor set.
+  async function scan(isBoot) {
+    if (scanning) { rescanPending = true; return; }
+    scanning = true;
+    stopObserving(); // our own anchoring mutations (stray spans) must not re-trigger us
+    try {
+      var liveMap = await assignAnchors(document.body);
+      // assignAnchors already set data-hs-anchor on every current leaf. Mark any that
+      // aren't tracked yet as editable (respecting the current mode); refresh origText
+      // for genuinely new anchors only (don't clobber a run the user is editing).
+      liveMap.forEach(function (el, anchor) {
+        var known = anchorMap.get(anchor);
+        if (known !== el) {
+          // New anchor, OR the doc's JS replaced the node for an existing anchor
+          // (e.g. a tab re-injected the same content). Either way, (re)apply the
+          // editable attributes to the CURRENT live element and track it. Only set
+          // origText the first time we ever see an anchor, so re-showing a tab never
+          // clobbers the original text we owe the download source-patch.
+          markEditable(el, anchor, !origSet.has(anchor));
+          if (!(anchor in origText)) origText[anchor] = el.textContent;
+          if (currentMode !== 'edit') { el.removeAttribute('contenteditable'); el.spellcheck = false; }
+        }
+      });
+      // Honor the mode: if we're not in edit mode, don't leave new nodes editable.
+      if (currentMode !== 'edit') applyModeToAll(false);
+      post({
+        type: 'ready',
+        anchors: Array.from(anchorMap.keys()),
+        generated: Array.from(generated),
+        origText: origText,
+      });
+    } finally {
+      startObserving(); // resume watching for the doc's OWN future mutations
+      scanning = false;
+      if (rescanPending) { rescanPending = false; scan(false); }
+    }
+  }
+
   async function boot() {
     var raw = window.__MMW_RAW__ || '';
-    var origSet;
     try { origSet = await originalAnchorSet(raw); }
     catch (_) { origSet = new Set(); }
 
-    // Anchor the LIVE document (after the doc's own JS has built it) and split into
-    // editable (in original markup) vs generated (JS-produced).
-    var liveMap = await assignAnchors(document.body);
     anchorMap = new Map();
     generated = new Set();
-    liveMap.forEach(function (el, anchor) {
-      // All rendered text is editable; anchors NOT in the original markup are flagged
-      // generated (snapshot-only) so downloads can treat them correctly.
-      markEditable(el, anchor, !origSet.has(anchor));
-    });
-
+    origText = {};
     wireEditing();
-    // Capture each editable element's ORIGINAL (pre-edit) rendered text, keyed by
-    // anchor. The parent needs it to source-patch the compressed payload on
-    // download: overlay stores the NEW text, but to find-and-replace inside a gzip
-    // blob we must know the exact OLD string the doc's JS rendered.
-    var origText = {};
-    anchorMap.forEach(function (el, anchor) { origText[anchor] = el.textContent; });
-    post({
-      type: 'ready',
-      anchors: Array.from(anchorMap.keys()),
-      generated: Array.from(generated),
-      origText: origText,
+    await scan(true);
+    observeMutations();
+  }
+
+  // Re-anchor when the doc's JS changes the DOM (tab clicks, lazy sections, etc.).
+  // Debounced: a burst of mutations (a tab swapping many nodes) triggers ONE rescan.
+  // We only react to added element subtrees, not to our own attribute writes.
+  var mutationTimer = null;
+  var domObserver = null;
+  function startObserving() {
+    if (!domObserver) return;
+    domObserver.observe(document.body, { childList: true, subtree: true });
+  }
+  function stopObserving() {
+    if (!domObserver) return;
+    // Drain any queued records so re-connecting doesn't immediately re-fire on the
+    // mutations WE just made (wrapStrayText spans, markEditable was attrs-only).
+    domObserver.takeRecords();
+    domObserver.disconnect();
+  }
+  function observeMutations() {
+    domObserver = new MutationObserver(function (records) {
+      var meaningful = false;
+      for (var i = 0; i < records.length; i++) {
+        if (records[i].type === 'childList' && records[i].addedNodes.length) { meaningful = true; break; }
+      }
+      if (!meaningful) return;
+      if (mutationTimer) clearTimeout(mutationTimer);
+      mutationTimer = setTimeout(function () { mutationTimer = null; scan(false); }, 200);
     });
+    startObserving();
   }
 
   // The doc's own scripts may still be building the DOM. Give the load event (and
