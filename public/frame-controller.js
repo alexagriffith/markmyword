@@ -27,9 +27,14 @@
     'p','h1','h2','h3','h4','h5','h6','li','blockquote','pre','figcaption',
     'td','th','div','caption','summary','dd','dt',
   ]);
+  // Tags that never hold editable prose. NOTE: unlike anchoring.js this list does
+  // NOT include 'button' — in the in-frame hybrid editor a button's LABEL is visible
+  // text the reviewer expects to edit (e.g. "Try in Playground"). We still skip form
+  // controls that hold VALUE not child text (input/textarea/select) and non-text
+  // embeds (svg/img/canvas/media).
   var SKIP_TAGS = new Set([
     'script','style','svg','canvas','img','br','hr','input','textarea','select',
-    'button','iframe','object','embed','video','audio','head','meta','link','title',
+    'iframe','object','embed','video','audio','head','meta','link','title',
   ]);
 
   function normalizeText(s) { return String(s).replace(/\s+/g, ' ').trim(); }
@@ -123,30 +128,39 @@
     }
     return false;
   }
-  function containsBlockCandidate(el) {
+
+  // Does this element (or any descendant) qualify as an editable text unit? Used to
+  // pick the INNERMOST text holder: a <div> that only wraps a <span> of text is not
+  // itself the unit — the <span> is.
+  function containsEditableUnit(el) {
     for (var i = 0; i < el.children.length; i++) {
       var child = el.children[i];
-      var tag = child.tagName.toLowerCase();
-      if (SKIP_TAGS.has(tag)) continue;
-      if (BLOCK_TAGS.has(tag) && (hasDirectText(child) || containsBlockCandidate(child))) return true;
-      if (containsBlockCandidate(child)) return true;
+      if (SKIP_TAGS.has(child.tagName.toLowerCase())) continue;
+      if (isEditableLeaf(child) || containsEditableUnit(child)) return true;
     }
     return false;
   }
-  // Same rule as anchoring.js isEditableLeaf: a BLOCK_TAG leaf with direct text and
-  // no nested block. This is what the parent's download rebuild anchors, so the
-  // anchor sets line up. (Editing nested inline badges is handled separately via
-  // designMode-style broadening WITHOUT changing anchors — see below.)
+
+  // An editable text unit: ANY element (block OR inline — span, a, button, td, li,
+  // p, h1…) that has its OWN direct visible text and contains no nested element that
+  // is itself an editable unit. This is deliberately BROADER than anchoring.js's
+  // block-only rule: standalone/JS-built docs (like the AI Hub overview) render
+  // almost all their visible text inside inline <span>/<a>/<button> nodes, so a
+  // block-only rule leaves ~90% of the page uneditable. Anchoring is still by
+  // content hash of the element's normalized text, so edits bind to the right run.
   function isEditableLeaf(el) {
     var tag = el.tagName.toLowerCase();
-    if (SKIP_TAGS.has(tag) || !BLOCK_TAGS.has(tag)) return false;
-    if (!hasDirectText(el)) return false;
-    if (containsBlockCandidate(el)) return false;
+    if (SKIP_TAGS.has(tag)) return false;
+    if (!hasDirectText(el)) return false;      // no text of its own -> it's a wrapper
+    if (containsEditableUnit(el)) return false; // a descendant owns the text instead
     return true;
   }
+
+  // Collect innermost text-bearing elements anywhere under container, in document
+  // order. querySelectorAll('*') then filter keeps document order and dedupes.
   function collectLeaves(container) {
     var out = [];
-    var all = container.querySelectorAll(Array.from(BLOCK_TAGS).join(','));
+    var all = container.querySelectorAll('*');
     for (var i = 0; i < all.length; i++) {
       if (isEditableLeaf(all[i])) out.push(all[i]);
     }
