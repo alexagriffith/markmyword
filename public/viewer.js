@@ -524,8 +524,7 @@ function openSuggestPopup(el, opts = {}) {
   // Position near the block (block mode) or the selection (span/multi mode).
   document.body.appendChild(pop);
   const r = (span && span.rect) ? span.rect : el.getBoundingClientRect();
-  pop.style.top = `${window.scrollY + r.bottom + 6}px`;
-  pop.style.left = `${window.scrollX + Math.max(8, r.left)}px`;
+  positionPopupNear(pop, r);
   popupEl = pop;
   setKind(kind);
 }
@@ -569,8 +568,7 @@ function openCommentPopup(el) {
   };
   document.body.appendChild(pop);
   const r = el.getBoundingClientRect();
-  pop.style.top = `${window.scrollY + r.bottom + 6}px`;
-  pop.style.left = `${window.scrollX + Math.max(8, r.left)}px`;
+  positionPopupNear(pop, r);
   popupEl = pop;
   ta.focus();
 }
@@ -619,8 +617,7 @@ function openFrameCommentPopup({ anchor, isText, snippet, rect }) {
   };
   document.body.appendChild(pop);
   const r = frameToParentRect(rect);
-  pop.style.top = `${window.scrollY + r.bottom + 6}px`;
-  pop.style.left = `${window.scrollX + Math.max(8, r.left)}px`;
+  positionPopupNear(pop, r);
   popupEl = pop;
   setKind(kind);
 }
@@ -634,6 +631,39 @@ function frameToParentRect(rect) {
   const left = box.left + rect.left;
   const top = box.top + rect.top;
   return { left, top, bottom: top + (rect.height || 0), right: left + (rect.width || 0) };
+}
+
+// Place an already-appended popup near a target rect `r` (in VIEWPORT coords).
+// Prefers below the target; flips ABOVE when there isn't room in the viewport,
+// so a popup pinned to a low element never overflows off-screen. Also clamps the
+// left edge so the popup stays fully on screen horizontally. `pop` must be in the
+// DOM already (so we can measure its height).
+function positionPopupNear(pop, r) {
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  const vw = window.innerWidth || document.documentElement.clientWidth;
+  const ph = pop.offsetHeight || 220;
+  const pw = pop.offsetWidth || 340;
+  const gap = 6, margin = 8;
+  // Vertical: below by default; flip above if it would run past the viewport
+  // bottom AND there's more room above than below.
+  const roomBelow = vh - r.bottom;
+  const roomAbove = r.top;
+  let topVp;
+  if (roomBelow >= ph + gap || roomBelow >= roomAbove) {
+    // Floor at `margin` too: if the popup is taller than the viewport, the min()
+    // above can go negative — which would push the top off-screen ABOVE the
+    // document origin, unrecoverable (can't scroll to negative). Clamp it so the
+    // top never leaves the viewport; the bottom may still overflow (unavoidable
+    // for a popup taller than the viewport), but that's recoverable by scrolling.
+    topVp = Math.max(margin, Math.min(r.bottom + gap, vh - ph - margin));
+  } else {
+    topVp = Math.max(margin, r.top - ph - gap);
+  }
+  // Horizontal: align to the target's left, clamped into the viewport.
+  let leftVp = Math.max(margin, r.left);
+  if (leftVp + pw + margin > vw) leftVp = Math.max(margin, vw - pw - margin);
+  pop.style.top = `${window.scrollY + topVp}px`;
+  pop.style.left = `${window.scrollX + leftVp}px`;
 }
 
 // Highlighting a phrase now opens the phrase-scoped suggest popup IMMEDIATELY
