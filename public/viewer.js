@@ -290,9 +290,10 @@ function wireEditing() {
     // Defer so the browser has finalized the selection from this mouseup.
     setTimeout(() => {
       const span = currentSpanSelection();
-      // A highlighted phrase opens a suggestion scoped to JUST that phrase, right
-      // away — you don't have to click a separate "Suggest edit" bar first.
-      if (span) { openSuggestPopup(span.el, { span }); return; }
+      // A highlighted phrase (or multi-paragraph range) opens a suggestion scoped
+      // to JUST that selection, right away — no separate "Suggest edit" bar. For a
+      // multi-block span there's no single el; pass the first block for positioning.
+      if (span) { openSuggestPopup(span.multi ? span.blocks[0].el : span.el, { span }); return; }
       if (popupEl) return;
       const textEl = e.target.closest?.('[data-hs-anchor]');
       if (textEl) { openSuggestPopup(textEl); return; }
@@ -412,9 +413,19 @@ async function restore(versionId, when) {
 function blockText(el) { return isGroup(el) ? readGroupText(el) : el.textContent; }
 
 // Resolve any suggestion anchor to its element: comment anchors ("c:…") live in
-// commentMap (non-text elements), text anchors in anchorMap.
+// commentMap (non-text elements), text anchors in anchorMap. A multi-block anchor
+// ("m:a1,a2,…") resolves to its FIRST block (for goto/scroll + flash cosmetics).
 function resolveAnchorEl(anchor) {
-  return (anchor && anchor.startsWith('c:')) ? commentMap.get(anchor) : anchorMap.get(anchor);
+  if (!anchor) return undefined;
+  if (anchor.startsWith('c:')) return commentMap.get(anchor);
+  if (anchor.startsWith('m:')) return anchorMap.get(anchor.slice(2).split(',')[0]);
+  return anchorMap.get(anchor);
+}
+
+// The list of block anchors packed into a multi-block anchor ("m:a1,a2,…"),
+// or a single-element list for an ordinary anchor.
+function multiBlockAnchors(anchor) {
+  return (anchor && anchor.startsWith('m:')) ? anchor.slice(2).split(',').filter(Boolean) : [anchor];
 }
 
 // If there's a non-empty text selection that lands in an anchored block (in
@@ -428,38 +439,66 @@ function currentSpanSelection() {
 let popupEl = null;
 function closeSuggestPopup() { if (popupEl) { popupEl.remove(); popupEl = null; } }
 
+// A multi-paragraph rewrite is whole-paragraph granularity, so we cap how many
+// blocks one rewrite may span (the anchor list + re-split get unwieldy, and a
+// giant rewrite is better left as a comment). Over the cap the popup drops the
+// rewrite tab and offers comment-only; a comment can span any number of blocks.
+const MAX_MULTI_REWRITE_BLOCKS = 8;
+
 // Open the "suggest a change" popup.
-//   - span mode (opts.span): rewrite/comment on just the highlighted phrase.
+//   - span mode (opts.span): rewrite/comment on just the highlighted phrase, OR
+//     (opts.span.multi) a whole-paragraph rewrite/comment across several blocks.
 //   - block mode (default):  rewrite/comment on the whole block.
 function openSuggestPopup(el, opts = {}) {
   closeSuggestPopup();
   const span = opts.span || null;
-  const anchor = el.getAttribute('data-hs-anchor');
-  const blockFull = blockText(el);
-  const target = span ? span.phrase : blockFull.trim();
+  const multi = span && span.multi ? span : null;
+  // For a multi-block selection the anchor is the packed "m:" list; otherwise the
+  // clicked block's own anchor.
+  const anchor = multi ? multi.anchor : el.getAttribute('data-hs-anchor');
+  const blockFull = multi ? multi.phrase : blockText(el);
+  const target = multi ? multi.phrase : (span ? span.phrase : blockFull.trim());
+  // Rewrite is only offered when the block count is within the cap; a bigger
+  // multi-selection is comment-only (honest about what a rewrite can splice back).
+  const rewritable = !multi || multi.blocks.length <= MAX_MULTI_REWRITE_BLOCKS;
   const pop = document.createElement('div');
   pop.className = 'hs-suggest-pop';
-  const scopeLabel = span
-    ? `<div class="hs-sp-scope">on: “${target.slice(0, 90)}${target.length > 90 ? '…' : ''}”</div>`
+  const scopeText = multi
+    ? (rewritable
+        ? `Rewriting ${multi.blocks.length} paragraphs (edit them below, one blank line between each)`
+        : `Comment on ${multi.blocks.length} paragraphs (too many to rewrite at once — leave a comment)`)
+    : span
+    ? `on: “${target.slice(0, 90)}${target.length > 90 ? '…' : ''}”`
     : '';
-  pop.innerHTML = `
-    <div class="hs-sp-tabs">
+  const scopeLabel = scopeText ? `<div class="hs-sp-scope">${escapeHtml(scopeText)}</div>` : '';
+  const tabs = rewritable
+    ? `<div class="hs-sp-tabs">
       <button data-kind="rewrite" class="active">Suggest rewrite</button>
       <button data-kind="comment">Comment</button>
-    </div>
+    </div>`
+    : '';
+  pop.innerHTML = `
+    ${tabs}
     ${scopeLabel}
-    <textarea class="hs-sp-text" rows="4"></textarea>
+    <textarea class="hs-sp-text" rows="${multi ? 8 : 4}"></textarea>
     <div class="hs-sp-actions">
       <button class="hs-sp-cancel">Cancel</button>
-      <button class="hs-sp-submit">Suggest</button>
+      <button class="hs-sp-submit">${rewritable ? 'Suggest' : 'Comment'}</button>
     </div>`;
   const ta = pop.querySelector('.hs-sp-text');
-  let kind = 'rewrite';
+  let kind = rewritable ? 'rewrite' : 'comment';
   const setKind = (k) => {
     kind = k;
     pop.querySelectorAll('.hs-sp-tabs button').forEach((b) => b.classList.toggle('active', b.dataset.kind === k));
-    if (k === 'rewrite') { ta.value = target; ta.placeholder = span ? 'Edit the highlighted phrase…' : 'Edit the text to propose a rewrite…'; }
-    else { ta.value = ''; ta.placeholder = span ? 'Comment on the highlighted phrase…' : 'Leave a comment on this block…'; }
+    if (k === 'rewrite') {
+      ta.value = target;
+      ta.placeholder = multi ? 'Edit the paragraphs (one blank line between each)…'
+        : span ? 'Edit the highlighted phrase…' : 'Edit the text to propose a rewrite…';
+    } else {
+      ta.value = '';
+      ta.placeholder = multi ? 'Comment on these paragraphs…'
+        : span ? 'Comment on the highlighted phrase…' : 'Leave a comment on this block…';
+    }
     ta.focus();
   };
   pop.querySelectorAll('.hs-sp-tabs button').forEach((b) => b.onclick = () => setKind(b.dataset.kind));
@@ -467,25 +506,28 @@ function openSuggestPopup(el, opts = {}) {
   pop.querySelector('.hs-sp-submit').onclick = async () => {
     const body = ta.value.trim();
     if (!body) { ta.focus(); return; }
+    // Multi-block: span_occ -2 tells the server this is a whole-paragraph rewrite
+    // across the packed anchor list; base_text carries the original paragraphs
+    // (blank-line separated) so accept can re-split against them.
+    const spanOcc = multi ? (kind === 'rewrite' ? -2 : -1) : (span ? span.spanOcc : -1);
     await submitSuggestion({
       anchor,
       quote: target,
       body,
       kind,
-      spanOcc: span ? span.spanOcc : -1,
-      baseText: span ? blockFull : '',
+      spanOcc,
+      baseText: multi ? multi.phrase : (span ? blockFull : ''),
     });
     closeSuggestPopup();
   };
 
-  // Position near the block (block mode) or the selection (span mode). Fall back
-  // to the block's own rect if the selection rect is unavailable.
+  // Position near the block (block mode) or the selection (span/multi mode).
   document.body.appendChild(pop);
   const r = (span && span.rect) ? span.rect : el.getBoundingClientRect();
   pop.style.top = `${window.scrollY + r.bottom + 6}px`;
   pop.style.left = `${window.scrollX + Math.max(8, r.left)}px`;
   popupEl = pop;
-  setKind('rewrite');
+  setKind(kind);
 }
 
 // Describe a non-text element for a comment card ("image", "chart", etc.).
@@ -649,8 +691,11 @@ function renderSuggestions() {
     const target = locatable ? quote : '(couldn’t locate on page)';
     const isRewrite = s.kind === 'rewrite';
     const isSpan = Number(s.span_occ) >= 0;
+    const isMulti = (s.anchor || '').startsWith('m:');
     const diff = isRewrite ? renderDiffHtml(diffWords(quote, decodeEntities(s.body))) : '';
-    const scope = isSpan ? '<span class="hs-sg-span">phrase</span>' : '';
+    const scope = isMulti
+      ? `<span class="hs-sg-span">${multiBlockAnchors(s.anchor).length} paragraphs</span>`
+      : isSpan ? '<span class="hs-sg-span">phrase</span>' : '';
     return `
       <div class="hs-sg-card" data-sid="${s.id}">
         <div class="hs-sg-meta"><span class="hs-sg-kind ${s.kind}">${isRewrite ? 'Rewrite' : 'Comment'}</span> ${scope} <span class="hs-sg-author">${escapeHtml(s.author || 'reviewer')}</span></div>
@@ -677,6 +722,16 @@ function renderSuggestions() {
       // (best-effort) anchor can't be re-found, which marks the card.
       if (interactive) {
         if (frame && frame.contentWindow) frame.contentWindow.postMessage({ type: 'flashComment', anchor: s.anchor }, '*');
+        return;
+      }
+      // Multi-block: scroll to the first block, flash EVERY block in the range.
+      if ((s.anchor || '').startsWith('m:')) {
+        const els = multiBlockAnchors(s.anchor).map((a) => anchorMap.get(a)).filter(Boolean);
+        if (els.length) {
+          els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+          els.forEach((e) => e.classList.add('hs-flash'));
+          setTimeout(() => els.forEach((e) => e.classList.remove('hs-flash')), 1200);
+        }
         return;
       }
       const el = resolveAnchorEl(s.anchor);

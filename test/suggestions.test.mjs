@@ -107,6 +107,51 @@ ok(r.status === 200, 'accept element comment 200');
 doc = await get(`/api/doc/${DOC}`);
 ok(!doc.overlay[cAnchor], 'accepting an element comment does not create an overlay entry');
 
+// 11. MULTI-block rewrite: one suggestion across N paragraphs (span_occ -2).
+// The anchor packs the blocks' anchors as "m:a1,a2,…"; the body is blank-line-
+// separated paragraphs; accept writes each paragraph to its own anchor.
+const mAnchor = 'm:blkone,blktwo,blkthree';
+r = await post(`/api/suggest/${DOC}`, {
+  anchor: mAnchor,
+  quote: 'para one\n\npara two\n\npara three',
+  body: 'new one\n\nnew two\n\nnew three',
+  kind: 'rewrite', spanOcc: -2, baseText: 'para one\n\npara two\n\npara three', author: 'owner',
+});
+ok(r.status === 200, 'multi-block suggest 200');
+const mS = (await r.json()).suggestion;
+ok(mS.span_occ === -2, 'multi-block span_occ persisted (-2)');
+ok(mS.anchor === mAnchor, 'multi-block packed anchor persisted');
+
+r = await post(`/api/suggest/${DOC}/${mS.id}/accept`);
+ok(r.status === 200, 'multi-block accept 200');
+const mOv = (await r.json()).overlay;
+ok(mOv.blkone && mOv.blkone.text === 'new one', 'first paragraph applied to first anchor');
+ok(mOv.blktwo && mOv.blktwo.text === 'new two', 'second paragraph applied to second anchor');
+ok(mOv.blkthree && mOv.blkthree.text === 'new three', 'third paragraph applied to third anchor');
+
+// 12. Multi-block accept with a paragraph-count MISMATCH -> stale, nothing applied.
+const mMismatch = 'm:mm1,mm2,mm3';
+r = await post(`/api/suggest/${DOC}`, {
+  anchor: mMismatch, quote: 'a\n\nb\n\nc', body: 'only two\n\nparagraphs here',
+  kind: 'rewrite', spanOcc: -2, baseText: 'a\n\nb\n\nc',
+});
+const mmS = (await r.json()).suggestion;
+r = await post(`/api/suggest/${DOC}/${mmS.id}/accept`);
+ok(r.status === 409, 'multi-block paragraph-count mismatch -> 409 stale');
+ok((await r.json()).error === 'span_stale', 'mismatch surfaces stale error');
+doc = await get(`/api/doc/${DOC}`);
+ok(!doc.overlay['mm1'] && !doc.overlay['mm3'], 'mismatched multi accept did not touch overlay');
+
+// 13. span_occ -2 rewrite WITHOUT an m: anchor is rejected (must carry a list).
+ok((await post(`/api/suggest/${DOC}`, { anchor: 'plain', quote: 'x', body: 'y', kind: 'rewrite', spanOcc: -2 })).status === 400,
+   'multi rewrite without an m: anchor rejected');
+// span_occ below -2 is out of range.
+ok((await post(`/api/suggest/${DOC}`, { anchor: 'x', body: 'y', kind: 'comment', spanOcc: -3 })).status === 400,
+   'span_occ < -2 rejected');
+// A multi-block COMMENT (no rewrite) is fine at -1 with an m: anchor.
+r = await post(`/api/suggest/${DOC}`, { anchor: 'm:cc1,cc2', quote: 'p1\n\np2', body: 'both of these need work', kind: 'comment' });
+ok(r.status === 200, 'multi-block comment (m: anchor, kind comment) 200');
+
 server.close();
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

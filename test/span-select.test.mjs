@@ -54,17 +54,25 @@ ok(s && s.wholeBlock === true, 'whole-block highlight flagged wholeBlock');
 ok(s && s.spanOcc === -1, 'whole-block -> spanOcc -1 (block rewrite, not fragile span)');
 ok(s && s.phrase === full, 'whole-block phrase is the entire block text');
 
-// --- 4. OVERSHOOT past the block end into the next paragraph -----------------
-// Start inside #a, end inside #b. Must clamp to #a and NOT include #b's text.
+// --- 4. Selection SPANNING two paragraphs -> MULTI-block ---------------------
+// Start mid-#a, end mid-#b. This is now a multi-block selection (NOT clamped):
+// both blocks are pulled in WHOLE (whole-paragraph granularity).
 s = selectAndResolve(a, 5, b, 4);
-ok(s && s.anchor === 'a', 'overshoot-forward clamps to the starting block (#a)');
-ok(s && !/next paragraph/.test(s.phrase), 'overshoot phrase does NOT leak the next paragraph text');
-ok(s && s.phrase.startsWith('limiting'), `overshoot phrase starts at the selection start ("${s && s.phrase.slice(0, 16)}…")`);
-ok(s && s.phrase.endsWith('end'), 'overshoot phrase is clamped to the block END');
+ok(s && s.multi === true, 'a selection crossing two paragraphs is a multi-block selection');
+ok(s && s.blocks.length === 2, `multi picks up both blocks (got ${s && s.blocks.length})`);
+ok(s && s.anchor === 'm:a,b', `multi anchor packs both anchors in order (got "${s && s.anchor}")`);
+ok(s && /rate limiting/.test(s.phrase) && /next paragraph/.test(s.phrase), 'multi phrase includes BOTH paragraphs in full');
+ok(s && s.phrase === full + '\n\nnext paragraph distinct text', 'multi phrase joins whole paragraphs with a blank line');
+
+// --- 4b. Multi-block that also touches the heading (3 blocks) -----------------
+s = selectAndResolve(doc.querySelector('h2').firstChild, 2, b, 4);
+ok(s && s.multi === true && s.blocks.length === 3, `heading→#b spans 3 blocks (got ${s && s.blocks && s.blocks.length})`);
+ok(s && s.anchor === 'm:h,a,b', `3-block anchor is in document order (got "${s && s.anchor}")`);
 
 // --- 5. Selection STARTS outside the block (in the heading), ends inside #a --
+// (Heading + #a is now a 2-block multi selection.)
 s = selectAndResolve(doc.querySelector('h2').firstChild, 0, a, 13);
-ok(s, 'a selection starting in the heading but ending in #a still resolves (start-block wins)');
+ok(s && s.multi === true && s.blocks.length === 2, 'a selection from the heading into #a resolves as a 2-block multi selection');
 
 // --- 6. No anchored block anywhere -> null -----------------------------------
 const plain = doc.getElementById('plain').firstChild;

@@ -155,6 +155,26 @@ export const acceptSuggestion = (db) => db.transaction((id, text, ts) => {
   if (s.kind === 'rewrite') {
     const overlay = getOverlay(db, s.doc_id);
     let applied = text;
+    // Multi-block whole-paragraph rewrite: the anchor is an "m:"-packed list and the
+    // body is blank-line-separated paragraphs. Re-split the body, map each piece to
+    // its block anchor in order, and write each as an independent overlay entry.
+    // Drop-not-misplace: if the paragraph count doesn't match the block count we
+    // refuse (mark stale) rather than guess which piece belongs where.
+    if (s.span_occ === -2 && s.anchor.startsWith('m:')) {
+      const anchors = s.anchor.slice(2).split(',').filter(Boolean);
+      // body is stored escaped; split on a blank line (one or more), trim empties.
+      const pieces = String(s.body).split(/\n\s*\n/).map((p) => p.trim()).filter((p) => p.length > 0);
+      if (pieces.length !== anchors.length) {
+        setSuggestionStatus(db, id, 'stale');
+        return { overlay, stale: true };
+      }
+      for (let i = 0; i < anchors.length; i++) overlay[anchors[i]] = { text: pieces[i], updatedAt: ts };
+      setSuggestionStatus(db, id, 'accepted');
+      saveOverlay(db, s.doc_id, overlay, ts);
+      db.prepare('INSERT INTO document_versions (doc_id, ts, overlay_json, label) VALUES (?, ?, ?, ?)')
+        .run(s.doc_id, ts, JSON.stringify(overlay), `accept suggestion ${id.slice(0, 8)}`);
+      return overlay;
+    }
     if (s.span_occ >= 0) {
       const current = overlay[s.anchor]?.text ?? s.base_text ?? '';
       const next = replaceNthOccurrence(current, s.quote, s.body, s.span_occ);

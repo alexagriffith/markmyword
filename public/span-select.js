@@ -39,14 +39,66 @@ function rangeRect(range) {
   try { return range.getBoundingClientRect ? range.getBoundingClientRect() : null; } catch { return null; }
 }
 
+// Every anchored block that the given range intersects, in document order.
+// This is what turns a drag across paragraphs into a MULTI-block selection: we
+// stop clamping to one block and instead collect all blocks the selection
+// touches. A block counts as touched if the range overlaps it at all (even by a
+// single character), so a mid-P1 → mid-P3 drag returns [P1, P2, P3] — each pulled
+// in WHOLE (whole-paragraph granularity; the caller warns the reviewer of scope).
+export function blocksInRange(doc, range) {
+  const all = doc.querySelectorAll('[data-hs-anchor]');
+  const hit = [];
+  for (const el of all) {
+    // intersectsNode isn't in jsdom; compute overlap via boundary-point compares:
+    // block is touched unless it ends before the range starts or starts after it ends.
+    const br = doc.createRange();
+    br.selectNodeContents(el);
+    const RangeCtor = (doc.defaultView && doc.defaultView.Range) || Range;
+    let endsBeforeStart, startsAfterEnd;
+    try {
+      endsBeforeStart = range.compareBoundaryPoints(RangeCtor.START_TO_END, br) <= 0; // block end <= range start
+      startsAfterEnd = range.compareBoundaryPoints(RangeCtor.END_TO_START, br) >= 0;  // block start >= range end
+    } catch { continue; }
+    if (!endsBeforeStart && !startsAfterEnd) hit.push(el);
+  }
+  return hit;
+}
+
 // Resolve the current Selection (in window `win`) to a span descriptor, or null.
 //   blockTextOf(el) -> the block's effective text (lets the caller handle grouping)
-// Returns { el, anchor, phrase, spanOcc, rect, wholeBlock? } or null.
+// Returns one of:
+//   { multi:true, blocks:[{el,anchor,text}], anchor:"m:a1,a2,…", phrase, rect }  (spans >1 block)
+//   { el, anchor, phrase, spanOcc, rect, wholeBlock? }                            (single block)
+//   null
 export function resolveSpanSelection(win, blockTextOf) {
   const doc = win.document;
   const sel = win.getSelection();
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
   const range = sel.getRangeAt(0);
+
+  // Multi-block: the selection touches more than one anchored block. Pull each
+  // touched block in WHOLE (whole-paragraph granularity) and pack their existing
+  // anchors into an "m:"-namespaced list. No new hashing — every block already
+  // has a stable content-hash anchor from assignAnchors.
+  const touched = blocksInRange(doc, range);
+  if (touched.length > 1) {
+    const blocks = touched.map((el) => ({
+      el,
+      anchor: el.getAttribute('data-hs-anchor'),
+      text: blockTextOf(el),
+    })).filter((b) => b.anchor);
+    if (blocks.length > 1) {
+      const phrase = blocks.map((b) => normalizeText(b.text)).filter(Boolean).join('\n\n');
+      return {
+        multi: true,
+        blocks,
+        anchor: 'm:' + blocks.map((b) => b.anchor).join(','),
+        phrase,
+        rect: rangeRect(range),
+      };
+    }
+  }
+
   const el = anchoredBlockOf(range.startContainer)
     || anchoredBlockOf(range.endContainer)
     || anchoredBlockOf(range.commonAncestorContainer);

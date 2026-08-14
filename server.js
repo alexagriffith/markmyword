@@ -508,17 +508,26 @@ export function createApp(db, opts = {}) {
     if (await readDocHtml(id) == null) return res.status(404).json({ error: 'doc_not_found' });
     const { anchor, quote, body, kind, author, spanOcc, baseText } = req.body || {};
     if (kind !== 'rewrite' && kind !== 'comment') return res.status(400).json({ error: 'invalid_kind' });
-    if (typeof anchor !== 'string' || !anchor || anchor.length > 200) return res.status(400).json({ error: 'invalid_anchor' });
+    // A multi-block anchor ("m:a1,a2,…") packs several block anchors, so it needs a
+    // larger cap than a single anchor. 1000 chars fits ~14 sha256 anchors — well
+    // above the client's 8-block rewrite cap.
+    if (typeof anchor !== 'string' || !anchor || anchor.length > 1000) return res.status(400).json({ error: 'invalid_anchor' });
     if (typeof body !== 'string' || body.length === 0 || body.length > MAX_TEXT) return res.status(400).json({ error: 'invalid_body' });
-    // span_occ: -1 = whole block; >=0 = replace the Nth occurrence of `quote`.
-    // A span-level rewrite MUST carry a non-empty quote to locate the phrase.
+    // span_occ: -2 = multi-block whole-paragraph rewrite (anchor is an "m:" list;
+    // body is blank-line-separated paragraphs re-split at accept). -1 = whole block.
+    // >=0 = replace the Nth occurrence of `quote`. A span-level rewrite MUST carry a
+    // non-empty quote to locate the phrase.
     let span_occ = -1;
     if (spanOcc != null) {
-      if (!Number.isInteger(spanOcc) || spanOcc < -1) return res.status(400).json({ error: 'invalid_span' });
+      if (!Number.isInteger(spanOcc) || spanOcc < -2) return res.status(400).json({ error: 'invalid_span' });
       span_occ = spanOcc;
     }
     if (span_occ >= 0 && kind === 'rewrite' && !(typeof quote === 'string' && quote.length > 0)) {
       return res.status(400).json({ error: 'span_requires_quote' });
+    }
+    // A multi-block rewrite must actually carry a packed anchor list to apply to.
+    if (span_occ === -2 && kind === 'rewrite' && !anchor.startsWith('m:')) {
+      return res.status(400).json({ error: 'multi_requires_list' });
     }
     // base_text/quote/body are UNTRUSTED (reviewers). We escape body+quote+author
     // for display. base_text must be escaped too because span replacement happens
