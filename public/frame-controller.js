@@ -220,6 +220,77 @@
     return map;
   }
 
+  // ---- comment anchors (ANY element) ------------------------------------------
+  // A reviewer can COMMENT on anything ("make this button smaller"), not only on
+  // editable text. Comments need an anchor that survives a reload even for elements
+  // the doc's JS draws at runtime, so we hash a stable-ish SIGNATURE of the element:
+  // its tag, id, class, a short text snippet, and its structural position (index
+  // among siblings, up a bounded number of levels). This is best-effort — if the doc
+  // re-renders differently the anchor may not re-resolve, and the parent labels that
+  // comment "couldn't locate on page". Comment anchors are 'c:'-namespaced so they
+  // never collide with text anchors (which route through anchorMap in the parent).
+  var commentMap = new Map();    // 'c:'-anchor -> element (any commentable element)
+
+  function commentSignature(el) {
+    var tag = el.tagName.toLowerCase();
+    var id = el.id || '';
+    var cls = (el.getAttribute('class') || '').trim();
+    var text = normalizeText(el.textContent || '').slice(0, 60);
+    // Bounded structural path: index-among-element-siblings for up to 4 ancestors.
+    var path = [];
+    var node = el;
+    for (var depth = 0; depth < 4 && node && node.parentElement; depth++) {
+      var sibs = node.parentElement.children;
+      var idx = 0;
+      for (var i = 0; i < sibs.length; i++) { if (sibs[i] === node) { idx = i; break; } }
+      path.push(node.tagName.toLowerCase() + ':' + idx);
+      node = node.parentElement;
+    }
+    return tag + '|' + id + '|' + cls + '|' + text + '|' + path.join('>');
+  }
+
+  // A short human label for a commented element, shown on the suggestion card so the
+  // reviewer knows what a comment refers to (e.g. "button: Try in Playground").
+  function commentLabel(el) {
+    var tag = el.tagName.toLowerCase();
+    var text = normalizeText(el.textContent || '').slice(0, 40);
+    if (text) return tag + ': ' + text;
+    var alt = el.getAttribute && (el.getAttribute('alt') || el.getAttribute('aria-label'));
+    if (alt) return tag + ': ' + normalizeText(alt).slice(0, 40);
+    return tag;
+  }
+
+  // Assign a 'c:' comment anchor to a single element (idempotent). Occurrence-suffixed
+  // against commentMap so two visually-identical elements get distinct anchors.
+  async function assignCommentAnchor(el) {
+    var existing = el.getAttribute('data-hs-comment-anchor');
+    if (existing) return existing;
+    var base = 'c:' + (await sha256hex(commentSignature(el)));
+    var occ = 0;
+    var anchor = base;
+    while (commentMap.has(anchor) && commentMap.get(anchor) !== el) {
+      occ++; anchor = base + '#' + occ;
+    }
+    el.setAttribute('data-hs-comment-anchor', anchor);
+    commentMap.set(anchor, el);
+    return anchor;
+  }
+
+  // Walk the live DOM and give EVERY commentable element a 'c:' anchor. Commentable
+  // = any element that isn't our chrome, a script/style, or a non-rendered head node.
+  // Runs when suggest mode is entered and after each rescan while suggesting.
+  async function assignCommentAnchorsFrame() {
+    var all = document.body ? document.body.querySelectorAll('*') : [];
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      var tag = el.tagName.toLowerCase();
+      if (tag === 'script' || tag === 'style' || tag === 'head' || tag === 'meta'
+          || tag === 'link' || tag === 'title') continue;
+      if (el.hasAttribute('data-hs-straytext')) continue; // our own wrapper spans
+      await assignCommentAnchor(el);
+    }
+  }
+
   // ---- original-markup anchor set ---------------------------------------------
   // Parse the ORIGINAL html (no scripts run in DOMParser) to learn which anchors
   // belong to real markup text. After the doc's JS runs, any anchored element in
@@ -325,7 +396,25 @@
     if (m.type === 'applyOverlay') { applyOverlay(m.overlay || {}); }
     else if (m.type === 'setMode') { setMode(m.mode); }
     else if (m.type === 'serialize') { post({ type: 'snapshot', html: serialize() }); }
+    else if (m.type === 'flashComment') { flashComment(m.anchor); }
   });
+
+  // Parent asked to reveal a commented element (panel "goto"). Resolve the anchor to
+  // a live element, scroll it into view, and flash it. If we can't find it (the doc
+  // re-rendered and the element is gone), tell the parent so it can label the card.
+  function flashComment(anchor) {
+    if (typeof anchor !== 'string') return;
+    var el = commentMap.get(anchor)
+      || (anchor.charAt(0) === 'c'
+            ? document.querySelector('[data-hs-comment-anchor="' + cssEscape(anchor) + '"]')
+            : document.querySelector('[data-hs-anchor="' + cssEscape(anchor) + '"]'));
+    if (!el || !document.body.contains(el)) { post({ type: 'commentMissing', anchor: anchor }); return; }
+    try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (_) { el.scrollIntoView(); }
+    el.classList.add('hs-frame-flash');
+    setTimeout(function () { el.classList.remove('hs-frame-flash'); }, 1200);
+  }
+  // Minimal CSS.escape for attribute-selector values (jsdom/older browsers lack it).
+  function cssEscape(s) { return String(s).replace(/["\\]/g, '\\$&'); }
 
   function applyOverlay(overlay) {
     var keys = Object.keys(overlay);
@@ -349,13 +438,79 @@
       else { el.removeAttribute('contenteditable'); el.spellcheck = false; }
     });
   }
-  // 'edit' -> all text contenteditable (clicks on links/buttons are intercepted for
-  // caret placement, so the doc's controls are inert while editing — expected).
-  // Anything else ('use'/'view'/'suggest') -> NOT editable, so the doc's OWN links,
-  // tabs and buttons work normally. 'use' is the viewer's "make it interactive" mode.
+  // Modes:
+  //   'edit'    -> all text contenteditable (clicks on links/buttons place a caret,
+  //                so the doc's controls are inert while editing — expected).
+  //   'suggest' -> NOT editable; clicking ANY element opens a comment popup (parent
+  //                side) instead of triggering the control. Comment anchors assigned.
+  //   'use'/'view'/other -> NOT editable AND no suggest capture, so the doc's own
+  //                links/tabs/buttons work normally ("make it interactive").
   function setMode(mode) {
-    currentMode = mode === 'edit' ? 'edit' : 'view';
+    currentMode = mode === 'edit' ? 'edit' : (mode === 'suggest' ? 'suggest' : 'view');
     applyModeToAll(currentMode === 'edit');
+    if (document.body) {
+      document.body.classList.toggle('hs-frame-suggesting', currentMode === 'suggest');
+    }
+    if (currentMode === 'suggest') {
+      // Assign comment anchors so a click can name its target immediately.
+      assignCommentAnchorsFrame();
+    }
+  }
+
+  // Suggest-mode click: capture BEFORE the doc's own handlers so a control click
+  // becomes a comment target instead of firing the control. Any element is
+  // commentable. Text leaves report their existing text anchor (so a comment can sit
+  // beside a rewrite); everything else reports/gets a 'c:' comment anchor.
+  function wireSuggesting() {
+    document.addEventListener('click', function (e) {
+      if (currentMode !== 'suggest') return;
+      var el = e.target;
+      if (!el || el.nodeType !== 1) return;
+      // Never treat our own stray-text wrapper as the target; use its parent context.
+      e.preventDefault();
+      e.stopPropagation();
+      var textEl = el.closest && el.closest('[data-hs-anchor]');
+      handleSuggestClick(el, textEl);
+    }, true);
+  }
+
+  async function handleSuggestClick(el, textEl) {
+    var anchor, isText, snippet;
+    if (textEl) {
+      anchor = textEl.getAttribute('data-hs-anchor');
+      isText = true;
+      snippet = commentLabel(textEl);
+      el = textEl;
+    } else {
+      anchor = await assignCommentAnchor(el);
+      isText = false;
+      snippet = commentLabel(el);
+    }
+    var r;
+    try { r = el.getBoundingClientRect(); } catch (_) { r = { left: 0, top: 0, width: 0, height: 0 }; }
+    post({
+      type: 'suggestTarget',
+      anchor: anchor,
+      isText: isText,
+      quote: snippet,
+      snippet: snippet,
+      rect: { left: r.left, top: r.top, width: r.width, height: r.height },
+    });
+  }
+
+  // Inject minimal styles for the suggest-mode hover affordance and the goto flash.
+  // Scoped to our data-attrs so it can't disturb the doc's own look outside suggest.
+  function injectSuggestStyles() {
+    if (document.getElementById('hs-frame-style')) return;
+    var s = document.createElement('style');
+    s.id = 'hs-frame-style';
+    s.textContent =
+      'body.hs-frame-suggesting * { cursor: crosshair !important; }'
+      + 'body.hs-frame-suggesting *:hover { outline: 2px solid rgba(122,79,156,.55) !important;'
+      + ' outline-offset: 1px; }'
+      + '.hs-frame-flash { animation: hsFrameFlash 1.1s ease; }'
+      + '@keyframes hsFrameFlash { 0%,100%{ box-shadow:none; } 30%{ box-shadow:0 0 0 3px rgba(217,166,46,.6); } }';
+    (document.head || document.documentElement).appendChild(s);
   }
 
   // ---- boot / rescan ----------------------------------------------------------
@@ -394,6 +549,9 @@
       });
       // Honor the mode: if we're not in edit mode, don't leave new nodes editable.
       if (currentMode !== 'edit') applyModeToAll(false);
+      // While suggesting, freshly-injected elements need comment anchors too so a
+      // click on newly-revealed content can still name its target.
+      if (currentMode === 'suggest') await assignCommentAnchorsFrame();
       post({
         type: 'ready',
         anchors: Array.from(anchorMap.keys()),
@@ -414,8 +572,11 @@
 
     anchorMap = new Map();
     generated = new Set();
+    commentMap = new Map();
     origText = {};
+    injectSuggestStyles();
     wireEditing();
+    wireSuggesting();
     await scan(true);
     observeMutations();
   }

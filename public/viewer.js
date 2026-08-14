@@ -12,6 +12,8 @@ import { assignAnchors, assignCommentAnchors, normalizeText, GROUP_ATTR, groupSh
 import { diffWords, renderDiffHtml } from './diff.js';
 import { resolveAssets, forceRevealContent, summarizeMissing, healImageAssets } from './assets.js';
 import { icon } from './icons.js';
+import { parseSuggestTarget } from './frame-messages.js';
+import { resolveSpanSelection } from './span-select.js';
 
 const $ = (s) => document.querySelector(s);
 const statusEl = $('#hs-status');
@@ -201,11 +203,14 @@ function applyMode() {
   const suggesting = mode === 'suggest';
   document.body.classList.toggle('hs-edit', editing);
   document.body.classList.toggle('hs-suggest', suggesting);
-  // Interactive docs live in the sandboxed frame; drive editability across the
-  // bridge. (Suggest/comment parity in the frame is phase 2 — for now the frame
-  // supports edit mode; suggesting simply disables in-frame editing.)
+  // Interactive docs live in the sandboxed frame; drive editability + suggest
+  // behavior across the bridge. In suggest mode the frame captures clicks on ANY
+  // element and posts back a `suggestTarget` (see onFrameMessage), which opens a
+  // comment/rewrite popup positioned over the frame. Leaving suggest mode closes
+  // any open popup so a stale popup can't float over a now-interactive doc.
   if (interactive) {
     if (frame && frame.contentWindow) frame.contentWindow.postMessage({ type: 'setMode', mode }, '*');
+    if (!suggesting) closeSuggestPopup();
     return;
   }
   for (const el of anchorMap.values()) {
@@ -276,7 +281,8 @@ function wireEditing() {
     }
   });
   // Suggesting mode: after a mouseup, decide between:
-  //  - a span selection inside a text block -> floating "Suggest edit" bar
+  //  - a span selection inside a text block -> open the phrase-scoped popup
+  //    IMMEDIATELY over the highlight (Google-Docs style; no extra click)
   //  - a plain click on a text block        -> whole-block suggest popup
   //  - a click on a non-text element        -> comment-only popup
   root.addEventListener('mouseup', (e) => {
@@ -284,7 +290,9 @@ function wireEditing() {
     // Defer so the browser has finalized the selection from this mouseup.
     setTimeout(() => {
       const span = currentSpanSelection();
-      if (span) { showSpanBar(span); return; }
+      // A highlighted phrase opens a suggestion scoped to JUST that phrase, right
+      // away — you don't have to click a separate "Suggest edit" bar first.
+      if (span) { openSuggestPopup(span.el, { span }); return; }
       if (popupEl) return;
       const textEl = e.target.closest?.('[data-hs-anchor]');
       if (textEl) { openSuggestPopup(textEl); return; }
@@ -409,45 +417,12 @@ function resolveAnchorEl(anchor) {
   return (anchor && anchor.startsWith('c:')) ? commentMap.get(anchor) : anchorMap.get(anchor);
 }
 
-// The occurrence index (0-based) of `phrase` within `haystack`, counting from the
-// start up to `charOffset` — i.e. how many identical phrases precede this one.
-// Lets a span-level suggestion target the exact repeat the user highlighted
-// (e.g. the 2nd "rate limiting" in a paragraph). Returns 0 if not resolvable.
-function occurrenceIndex(haystack, phrase, charOffset) {
-  if (!phrase) return 0;
-  let idx = 0, from = 0, n = 0;
-  while ((idx = haystack.indexOf(phrase, from)) !== -1 && idx < charOffset) {
-    n++; from = idx + phrase.length;
-  }
-  return n;
-}
-
-// Character offset of the start of a DOM Range within `blockEl`'s textContent.
-// We measure by cloning the range from block-start to the selection start.
-function rangeStartOffset(blockEl, range) {
-  const pre = document.createRange();
-  pre.selectNodeContents(blockEl);
-  try { pre.setEnd(range.startContainer, range.startOffset); } catch { return 0; }
-  return pre.toString().length;
-}
-
-// If there's a non-empty text selection inside a single anchored block (in
+// If there's a non-empty text selection that lands in an anchored block (in
 // Suggesting mode), describe the span so we can suggest a rewrite of just that
-// phrase. Returns { el, anchor, phrase, spanOcc, rect } or null.
+// phrase. The clamping/whole-block logic lives in span-select.js (unit-tested);
+// we pass blockText so grouped blocks report their combined text.
 function currentSpanSelection() {
-  const sel = window.getSelection();
-  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
-  const range = sel.getRangeAt(0);
-  const phrase = normalizeText(sel.toString());
-  if (!phrase) return null;
-  const startEl = range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement;
-  const el = startEl?.closest?.('[data-hs-anchor]');
-  // Selection must stay within one block (don't span across blocks).
-  if (!el || !el.contains(range.endContainer)) return null;
-  const full = blockText(el);
-  const offset = rangeStartOffset(el, range);
-  const spanOcc = occurrenceIndex(full, phrase, offset);
-  return { el, anchor: el.getAttribute('data-hs-anchor'), phrase, spanOcc, rect: range.getBoundingClientRect() };
+  return resolveSpanSelection(window, (el) => blockText(el));
 }
 
 let popupEl = null;
@@ -503,9 +478,10 @@ function openSuggestPopup(el, opts = {}) {
     closeSuggestPopup();
   };
 
-  // Position near the block (block mode) or the selection (span mode).
+  // Position near the block (block mode) or the selection (span mode). Fall back
+  // to the block's own rect if the selection rect is unavailable.
   document.body.appendChild(pop);
-  const r = span ? span.rect : el.getBoundingClientRect();
+  const r = (span && span.rect) ? span.rect : el.getBoundingClientRect();
   pop.style.top = `${window.scrollY + r.bottom + 6}px`;
   pop.style.left = `${window.scrollX + Math.max(8, r.left)}px`;
   popupEl = pop;
@@ -557,27 +533,72 @@ function openCommentPopup(el) {
   ta.focus();
 }
 
-// Small floating "Suggest edit" toolbar that appears over a text selection in
-// Suggesting mode (Google-Docs style). Clicking it opens the span popup.
-let spanBarEl = null;
-function closeSpanBar() { if (spanBarEl) { spanBarEl.remove(); spanBarEl = null; } }
-function showSpanBar(span) {
-  closeSpanBar();
-  const bar = document.createElement('div');
-  bar.className = 'hs-span-bar';
-  bar.innerHTML = `<button class="hs-span-suggest">${icon('edit', { size: 14 })} Suggest edit</button>`;
-  bar.querySelector('button').onmousedown = (e) => {
-    // mousedown (not click) so we act before the selection is cleared.
-    e.preventDefault();
-    closeSpanBar();
-    openSuggestPopup(span.el, { span });
+// Open a suggest/comment popup for an element clicked INSIDE the interactive
+// frame. The frame can't reach our DOM, so it reports a target descriptor:
+//   { anchor, isText, quote/snippet, rect (in FRAME coords) }
+// We position the popup over the frame using the frame's own offset + the rect,
+// and submit via the same /api/suggest path. Comment is always offered; a
+// rewrite tab is offered only for real markup text (isText) — JS-generated text
+// can be commented on but not baked into the download, so it stays comment-only.
+function openFrameCommentPopup({ anchor, isText, snippet, rect }) {
+  closeSuggestPopup();
+  const label = snippet || (isText ? 'this text' : 'this element');
+  const pop = document.createElement('div');
+  pop.className = 'hs-suggest-pop';
+  const tabs = isText
+    ? `<div class="hs-sp-tabs"><button data-kind="rewrite">Suggest rewrite</button><button data-kind="comment">Comment</button></div>`
+    : '';
+  pop.innerHTML = `
+    ${tabs}
+    <div class="hs-sp-scope">${escapeHtml(label)}</div>
+    <textarea class="hs-sp-text" rows="4"></textarea>
+    <div class="hs-sp-actions">
+      <button class="hs-sp-cancel">Cancel</button>
+      <button class="hs-sp-submit">${isText ? 'Suggest' : 'Comment'}</button>
+    </div>`;
+  const ta = pop.querySelector('.hs-sp-text');
+  // Default kind: rewrite when the target is editable markup text, else comment.
+  let kind = isText ? 'rewrite' : 'comment';
+  const setKind = (k) => {
+    kind = k;
+    pop.querySelectorAll('.hs-sp-tabs button').forEach((b) => b.classList.toggle('active', b.dataset.kind === k));
+    ta.placeholder = k === 'rewrite'
+      ? 'Propose new wording for this text…'
+      : 'Leave a comment (e.g. “make this header smaller”)…';
+    ta.focus();
   };
-  document.body.appendChild(bar);
-  const r = span.rect;
-  bar.style.top = `${window.scrollY + Math.max(8, r.top) - 40}px`;
-  bar.style.left = `${window.scrollX + r.left}px`;
-  spanBarEl = bar;
+  pop.querySelectorAll('.hs-sp-tabs button').forEach((b) => (b.onclick = () => setKind(b.dataset.kind)));
+  pop.querySelector('.hs-sp-cancel').onclick = closeSuggestPopup;
+  pop.querySelector('.hs-sp-submit').onclick = async () => {
+    const body = ta.value.trim();
+    if (!body) { ta.focus(); return; }
+    await submitSuggestion({ anchor, quote: label, body, kind, spanOcc: -1, baseText: '' });
+    closeSuggestPopup();
+  };
+  document.body.appendChild(pop);
+  const r = frameToParentRect(rect);
+  pop.style.top = `${window.scrollY + r.bottom + 6}px`;
+  pop.style.left = `${window.scrollX + Math.max(8, r.left)}px`;
+  popupEl = pop;
+  setKind(kind);
 }
+
+// Translate a rect reported in FRAME (iframe-internal) coordinates into the
+// parent's viewport coordinates by adding the iframe's on-screen origin. The
+// frame scrolls independently, so rect.top/left are already relative to the
+// iframe's own viewport — exactly what adding the iframe box origin needs.
+function frameToParentRect(rect) {
+  const box = frame && frame.getBoundingClientRect ? frame.getBoundingClientRect() : { left: 0, top: 0 };
+  const left = box.left + rect.left;
+  const top = box.top + rect.top;
+  return { left, top, bottom: top + (rect.height || 0), right: left + (rect.width || 0) };
+}
+
+// Highlighting a phrase now opens the phrase-scoped suggest popup IMMEDIATELY
+// (see the mouseup handler) — there's no intermediate "Suggest edit" bar to click.
+// closeSpanBar is kept as a harmless no-op so the mode-exit / Escape / outside-click
+// cleanup paths don't need to change.
+function closeSpanBar() { /* no span bar anymore; kept for call-site compatibility */ }
 
 async function submitSuggestion({ anchor, quote, body, kind, spanOcc = -1, baseText: bt = '' }) {
   setStatus('dirty', 'Sending suggestion…');
@@ -621,7 +642,11 @@ function renderSuggestions() {
     // interpolation below goes through escapeHtml — decoded text never hits
     // innerHTML raw (see the stored-XSS note on escapeHtml).
     const quote = decodeEntities(s.quote || '');
-    const target = el ? quote : '(block not found — text changed)';
+    // For interactive docs the element lives in the frame (not in our anchorMap),
+    // so "found" is decided by the frame at goto time; only mark not-found once the
+    // frame has told us it can't locate it (best-effort JS-element anchoring).
+    const locatable = interactive ? !missingCommentAnchors.has(s.anchor) : !!el;
+    const target = locatable ? quote : '(couldn’t locate on page)';
     const isRewrite = s.kind === 'rewrite';
     const isSpan = Number(s.span_occ) >= 0;
     const diff = isRewrite ? renderDiffHtml(diffWords(quote, decodeEntities(s.body))) : '';
@@ -646,7 +671,15 @@ function renderSuggestions() {
     card.querySelector('.hs-sg-reject')?.addEventListener('click', () => resolveSuggestion(sid, 'reject'));
     card.querySelector('.hs-sg-goto')?.addEventListener('click', () => {
       const s = suggestions.find((x) => x.id === sid);
-      const el = s && resolveAnchorEl(s.anchor);
+      if (!s) return;
+      // Interactive doc: the element lives in the sandboxed frame, not our DOM.
+      // Ask the frame to scroll to it + flash; it replies `commentMissing` if the
+      // (best-effort) anchor can't be re-found, which marks the card.
+      if (interactive) {
+        if (frame && frame.contentWindow) frame.contentWindow.postMessage({ type: 'flashComment', anchor: s.anchor }, '*');
+        return;
+      }
+      const el = resolveAnchorEl(s.anchor);
       if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('hs-flash'); setTimeout(() => el.classList.remove('hs-flash'), 1200); }
     });
   }
@@ -757,12 +790,38 @@ function onFrameMessage(e) {
       : 'That page isn’t part of this upload — only this document was shared.');
     return;
   }
+  if (m.type === 'suggestTarget') {
+    // The reviewer clicked an element in the frame while in Suggesting mode. The
+    // frame runs untrusted JS, so shape-validate before opening a popup (bounded
+    // anchor + finite/bounded rect); a malformed message is silently ignored.
+    if (mode !== 'suggest') return;
+    const t = parseSuggestTarget(m);
+    if (!t) return;
+    openFrameCommentPopup(t);
+    return;
+  }
+  if (m.type === 'commentMissing') {
+    // The frame couldn't re-find an element for a comment anchor (best-effort
+    // anchoring — a JS-drawn element that changed on reload). Mark its card so the
+    // reviewer knows the comment can't be pinpointed on the page anymore.
+    if (typeof m.anchor !== 'string') return;
+    markCommentMissing(m.anchor);
+    return;
+  }
   if (m.type === 'snapshot') {
     // Response to a serialize request. The string is UNTRUSTED (frame ran the doc's
     // JS); the resolver hands it to /api/snapshot for server-side sanitizing.
     if (typeof m.html === 'string' && snapshotResolve) { snapshotResolve(m.html); }
     return;
   }
+}
+
+// Anchors the frame told us it couldn't locate on the page (goto misses). Cards
+// for these show a "couldn't locate on page" marker.
+const missingCommentAnchors = new Set();
+function markCommentMissing(anchor) {
+  missingCommentAnchors.add(anchor);
+  renderSuggestions();
 }
 
 // Ask the frame to serialize its live DOM; resolves with the (still untrusted) HTML.
@@ -1093,7 +1152,6 @@ async function main() {
   document.addEventListener('click', (e) => {
     if (dlMenuEl && !dlMenuEl.contains(e.target) && !e.target.closest('#hs-download-btn')) closeDownloadMenu();
     if (popupEl && !popupEl.contains(e.target) && !e.target.closest('[data-hs-anchor]')) closeSuggestPopup();
-    if (spanBarEl && !spanBarEl.contains(e.target)) closeSpanBar();
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeSuggestPopup(); closeSpanBar(); closeDownloadMenu(); } });
 
