@@ -20,8 +20,9 @@ docs/assets/*
 !docs/screenshots/
 docs/screenshots/*
 !docs/screenshots/*.png
-# Demo GIF for the README (synthetic showcase doc, no real content).
+# Demo GIF + MP4 for the README (synthetic showcase doc, no real content).
 !docs/demo.gif
+!docs/demo.mp4
 
 # Local screen-recording demo scripts (throwaway, never shipped)
 .demo/
