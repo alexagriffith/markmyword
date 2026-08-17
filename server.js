@@ -14,6 +14,7 @@ import {
   setDocOwner, getDocOwner, countDocsOwnedBy, countGuestOwners, deleteDocData, ownerMap,
 } from './db.js';
 import { makeGuardrails, LIMITS } from './guardrails.js';
+import { makeFeedbackHandler } from './feedback-api.js';
 import { patchSource } from './source-patch.js';
 import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
@@ -580,6 +581,10 @@ export function createApp(db, opts = {}) {
     noStore(res);
     res.json({ ok: true });
   });
+
+  // In-app feedback → GitHub issue. Its own same-origin + honeypot + per-IP
+  // limiter live in feedback-api.js; the GITHUB_TOKEN stays server-side.
+  app.post('/api/feedback', makeFeedbackHandler({ now: opts.now }));
 
   // JSON error handler. Body-parser rejects an over-limit request BEFORE our own
   // size check with a PayloadTooLargeError (413); surface it as clean JSON with
