@@ -43,13 +43,17 @@ const STYLES = `
 
   .fb-overlay {
     position: fixed; inset: 0; z-index: 4001; display: none;
-    align-items: flex-end; justify-content: flex-start; padding: 18px;
+    align-items: flex-end; justify-content: flex-start;
+    /* Extra bottom gap clears the launcher so the panel never sits flush to
+       the viewport edge, even on a short window. */
+    padding: 18px 18px 74px;
     background: rgba(17,24,39,0.32);
   }
   .fb-overlay.open { display: flex; }
 
   .fb-panel {
     width: min(380px, 92vw);
+    max-height: calc(100vh - 92px); overflow-y: auto;
     background: #fff;
     border: 1px solid #e2e5ea;
     border-radius: 14px; padding: 18px;
@@ -68,7 +72,7 @@ const STYLES = `
   .fb-panel textarea::placeholder { color: #9aa1ad; }
   .fb-panel textarea:focus { outline: none; border-color: #4f46e5; box-shadow: 0 0 0 3px rgba(79,70,229,0.12); }
   .fb-hp { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; }
-  .fb-where { margin-top: 8px; font-size: 12px; color: #7a828f; }
+  .fb-where { margin-top: 8px; font-size: 12px; line-height: 1.45; color: #7a828f; }
   .fb-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
   .fb-btn {
     padding: 8px 14px; border-radius: 8px; cursor: pointer; font: 600 13px inherit;
