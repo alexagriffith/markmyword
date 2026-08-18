@@ -89,6 +89,32 @@ const now = () => (t += 5000);
   delete process.env.GITHUB_TOKEN; delete process.env.GITHUB_REPO;
 }
 
+// 5b. Issue-body injection is neutralized: message is fenced, @mentions defused.
+{
+  process.env.GITHUB_TOKEN = 'test-token-shh';
+  let seenBody = null;
+  const h = makeFeedbackHandler({
+    now,
+    fetchImpl: async (_url, init) => { seenBody = JSON.parse(init.body); return { ok: true, json: async () => ({ html_url: 'https://x/1', number: 1 }) }; },
+  });
+  const res = mkRes();
+  const msg = '@security-team look ![](http://evil/x.png)\n### fake heading';
+  await h(mkReq({ body: { message: msg, screen: '@someone #1' } }), res);
+  ok(seenBody.body.includes('```'), 'message wrapped in a fenced code block');
+  ok(!/(^|\s)@security-team\b/.test(seenBody.body.split('```')[2] || ''), 'mention outside the fence is defused');
+  ok(seenBody.title.indexOf('@security-team') === -1, 'title @mention defused');
+  delete process.env.GITHUB_TOKEN;
+}
+
+// 5c. Same-origin check is case-insensitive on host.
+{
+  const h = makeFeedbackHandler({ now, fetchImpl: async () => { throw new Error('no'); } });
+  const res = mkRes();
+  await h({ headers: { host: 'App.Test', origin: 'https://app.test', 'user-agent': 'x' }, socket: {}, body: { message: 'hello there' } }, res);
+  // 403 would mean origin mismatch; anything else means it passed the origin gate.
+  ok(res.statusCode !== 403, 'mixed-case host still counts as same-origin');
+}
+
 // 6. GitHub error -> 502, GitHub internals not leaked.
 {
   process.env.GITHUB_TOKEN = 'test-token-shh';

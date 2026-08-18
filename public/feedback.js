@@ -170,9 +170,19 @@ function mount() {
       const data = await resp.json().catch(() => ({}));
       if (resp.ok && data.ok) {
         status.className = 'fb-status ok';
-        status.innerHTML = data.url
-          ? `Thanks! <a href="${data.url}" target="_blank" rel="noopener">Issue #${data.number}</a> filed.`
-          : 'Thanks — your report was sent.';
+        // Build the success line with DOM nodes (never innerHTML), and only
+        // trust an http(s) issue URL, so nothing from the response can inject.
+        status.textContent = '';
+        const safeUrl = typeof data.url === 'string' && /^https?:\/\//.test(data.url) ? data.url : '';
+        if (safeUrl) {
+          status.append('Thanks! ');
+          const a = document.createElement('a');
+          a.href = safeUrl; a.target = '_blank'; a.rel = 'noopener';
+          a.textContent = `Issue #${String(data.number ?? '').replace(/[^0-9]/g, '')}`;
+          status.append(a, ' filed.');
+        } else {
+          status.textContent = 'Thanks — your report was sent.';
+        }
         text.value = '';
         setTimeout(close, 2200);
       } else {

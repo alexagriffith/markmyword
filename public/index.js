@@ -8,12 +8,19 @@ import { referencedImages } from './assets.js';
 
 const $ = (s) => document.querySelector(s);
 
-// The owner presents ?key=… once; keep it in the URL as we navigate so the tab
-// stays "owner". (The server also sets a cookie, so the key mainly matters on
-// first arrival / when sharing an owner link.)
+// The owner presents ?key=… once. The server sets a signed owner cookie on that
+// first request, so the tab stays "owner" from the cookie alone. We keep the key
+// in MEMORY only (for API calls, as a belt-and-suspenders alongside the cookie)
+// and immediately strip it from the visible URL so it can't linger in browser
+// history, bookmarks, or the Referer header. Page navigations do NOT re-append it.
 const KEY = new URLSearchParams(location.search).get('key');
+if (KEY) {
+  const u = new URL(location.href);
+  u.searchParams.delete('key');
+  history.replaceState(null, '', u.pathname + u.search + u.hash);
+}
 const withKey = (url) => (KEY ? url + (url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(KEY) : url);
-const viewerUrl = (id) => withKey(`/viewer.html?doc=${encodeURIComponent(id)}`);
+const viewerUrl = (id) => `/viewer.html?doc=${encodeURIComponent(id)}`;
 
 // ---- static icons ----
 $('#drop-ic').innerHTML = icon('upload', { size: 22 });

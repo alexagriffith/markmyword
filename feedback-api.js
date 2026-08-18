@@ -26,6 +26,13 @@ const RL_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 const RL_MAX = 6;                    // max submissions per IP per window
 const RL_MIN_GAP_MS = 4000;          // min gap between two submissions
 
+// Neutralize GitHub auto-linking in plain-text (non-fenced) contexts: a
+// zero-width space after @ / # stops mentions and issue cross-refs from firing,
+// while the text still reads normally.
+function defuse(s) {
+  return String(s).replace(/([@#])/g, '$1​');
+}
+
 // Client IP, honoring Fly's header first (same order guardrails uses).
 function clientIp(req) {
   return (
@@ -38,18 +45,22 @@ function clientIp(req) {
 
 function makeRateLimiter(now) {
   const hits = new Map(); // ip -> number[] of recent timestamps
+  let sweepAt = 0;
   return function rateLimited(ip) {
     const t = now();
+    // Proactively drop expired IPs on a timer, not only when the map is huge, so
+    // a spray of one-request-per-IP sources can't accumulate unbounded entries.
+    if (t > sweepAt) {
+      for (const [k, v] of hits) {
+        if (!v.some((ts) => t - ts < RL_WINDOW_MS)) hits.delete(k);
+      }
+      sweepAt = t + RL_WINDOW_MS;
+    }
     const arr = (hits.get(ip) || []).filter((ts) => t - ts < RL_WINDOW_MS);
     if (arr.length && t - arr[arr.length - 1] < RL_MIN_GAP_MS) { hits.set(ip, arr); return true; }
     if (arr.length >= RL_MAX) { hits.set(ip, arr); return true; }
     arr.push(t);
     hits.set(ip, arr);
-    if (hits.size > 5000) {
-      for (const [k, v] of hits) {
-        if (!v.some((ts) => t - ts < RL_WINDOW_MS)) hits.delete(k);
-      }
-    }
     return false;
   };
 }
@@ -60,10 +71,11 @@ function sameOrigin(req) {
   const src = req.headers.origin || req.headers.referer || '';
   if (!src) return false;
   let srcHost;
-  try { srcHost = new URL(src).host; } catch { return false; }
-  if (srcHost === host) return true;
+  try { srcHost = new URL(src).host.toLowerCase(); } catch { return false; }
+  const h = host.toLowerCase();
+  if (srcHost === h) return true;
   const extra = (process.env.FEEDBACK_ALLOWED_HOSTS || '')
-    .split(',').map((h) => h.trim()).filter(Boolean);
+    .split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
   return extra.includes(srcHost);
 }
 
@@ -110,13 +122,21 @@ export function makeFeedbackHandler({ now = () => Date.now(), fetchImpl = fetch 
     const ua = (req.headers['user-agent'] || '').toString().slice(0, 300);
 
     const oneLine = message.replace(/\s+/g, ' ').trim();
-    const title = `Feedback: ${oneLine.slice(0, 70)}${oneLine.length > 70 ? '…' : ''}`;
+    // Title is plain text on GitHub (no markdown), but neutralize @mentions so a
+    // title can't ping anyone, and drop backticks so it can't break out.
+    const title = `Feedback: ${defuse(oneLine).replace(/`/g, "'").slice(0, 70)}${oneLine.length > 70 ? '…' : ''}`;
+    // The reporter's message and screen are UNTRUSTED. Render them inside a fenced
+    // code block so markdown (links, images/tracking pixels, headings) and
+    // @mentions stay inert; guard against a fence break in the message itself.
+    const fence = message.includes('```') ? '````' : '```';
     const issueBody = [
+      fence,
       message,
+      fence,
       '',
       '---',
-      screen ? `**Where:** ${screen}` : '',
-      `**Browser:** ${ua}`,
+      screen ? `**Where:** \`${defuse(screen)}\`` : '',
+      `**Browser:** \`${ua.replace(/`/g, "'")}\``,
       `_Sent from the in-app feedback button._`,
     ].filter(Boolean).join('\n');
 

@@ -122,6 +122,9 @@ into the original markup — no markmyword attributes leak.
   `javascript:` URLs) so a stored file is inert.
 - **Reviewer text is untrusted:** suggestions and comments are escaped on store
   and rendered as text.
+- **Only the owner applies changes.** Anyone with the link can *suggest*, but
+  editing in place, restoring a version, and accepting or rejecting a suggestion
+  are gated to the document's owner — a reviewer can propose, never overwrite.
 - **Doc ids** are restricted to `[A-Za-z0-9._-]` (no path traversal).
 
 ---

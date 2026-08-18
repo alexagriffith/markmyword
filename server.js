@@ -444,11 +444,24 @@ export function createApp(db, opts = {}) {
     res.json({ ok: true, html: result.html, applied: result.applied, unmatched: result.unmatched });
   });
 
+  // Owner-only gate for the review DECISIONS on a doc (direct edit, restore,
+  // accept/reject). Suggesting stays open so any reviewer can propose changes;
+  // applying them is the owner's call. The global owner (OWNER_KEY) may act on
+  // any doc; a guest may act only on a doc they created (owner row === their
+  // token). Docs with no owner row (seed/demo) are owner-only. Mirrors the
+  // check already used by DELETE /api/doc/:id.
+  function ownsDoc(req, id) {
+    if (req.caller?.isOwner) return true;
+    const owner = getDocOwner(db, id);
+    return owner != null && owner === req.caller?.token;
+  }
+
   // POST /api/edit/:id { anchor, text } -> { ok, overlay }
   app.post('/api/edit/:id', writeLimiter, async (req, res) => {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     if (await readDocHtml(id) == null) return res.status(404).json({ error: 'doc_not_found' });
+    if (!ownsDoc(req, id)) return res.status(403).json({ error: 'not_your_doc' });
     const { anchor, text } = req.body || {};
     if (typeof anchor !== 'string' || !anchor || anchor.length > 200) {
       return res.status(400).json({ error: 'invalid_anchor' });
@@ -484,6 +497,7 @@ export function createApp(db, opts = {}) {
   app.post('/api/restore/:id', writeLimiter, (req, res) => {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
+    if (!ownsDoc(req, id)) return res.status(403).json({ error: 'not_your_doc' });
     const versionId = Number(req.body?.versionId);
     if (!Number.isInteger(versionId)) return res.status(400).json({ error: 'invalid_version_id' });
     const overlay = restoreVersion(db)(id, versionId, new Date().toISOString());
@@ -554,6 +568,7 @@ export function createApp(db, opts = {}) {
   app.post('/api/suggest/:id/:sid/accept', writeLimiter, (req, res) => {
     const { id, sid } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
+    if (!ownsDoc(req, id)) return res.status(403).json({ error: 'not_your_doc' });
     const s = getSuggestion(db, sid);
     if (!s || s.doc_id !== id) return res.status(404).json({ error: 'suggestion_not_found' });
     if (s.status !== 'open') return res.status(409).json({ error: 'already_resolved' });
@@ -574,6 +589,7 @@ export function createApp(db, opts = {}) {
   app.post('/api/suggest/:id/:sid/reject', writeLimiter, (req, res) => {
     const { id, sid } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
+    if (!ownsDoc(req, id)) return res.status(403).json({ error: 'not_your_doc' });
     const s = getSuggestion(db, sid);
     if (!s || s.doc_id !== id) return res.status(404).json({ error: 'suggestion_not_found' });
     if (s.status !== 'open') return res.status(409).json({ error: 'already_resolved' });

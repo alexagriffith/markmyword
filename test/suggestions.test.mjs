@@ -3,7 +3,10 @@
 // applying. Untrusted suggestion text is escaped on store.
 import assert from 'node:assert/strict';
 import { openDb } from '../db.js';
-import { createApp } from '../server.js';
+// Accept/reject are owner-only. Set an owner key BEFORE importing the server so
+// guardrails reads it, and act as owner via the x-owner-key header below.
+process.env.OWNER_KEY = process.env.OWNER_KEY || 'test-owner-key';
+const { createApp } = await import('../server.js');
 
 const db = openDb(':memory:');
 const app = createApp(db);
@@ -15,7 +18,8 @@ const DOC = 'example'; // a real docs/<id>.html must exist for the route checks
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) pass++; else { fail++; console.error('  ✗ ' + m); } };
-const post = (u, body) => fetch(base + u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+const OWNER = { 'Content-Type': 'application/json', 'x-owner-key': process.env.OWNER_KEY };
+const post = (u, body) => fetch(base + u, { method: 'POST', headers: OWNER, body: JSON.stringify(body || {}) });
 const get = (u) => fetch(base + u).then((r) => r.json());
 
 // 1. Create a rewrite suggestion.

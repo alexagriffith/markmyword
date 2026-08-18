@@ -46,6 +46,17 @@ let frameAnchors = new Set();
 let frameOrigText = {};   // anchor -> original rendered text (for source-patch)
 let interactive = false;
 
+// If an owner arrived here with ?key=… (the server has already set the owner
+// cookie on this request), strip it from the visible URL so the secret can't
+// linger in history / bookmarks / Referer. Auth carries on via the cookie.
+(function stripOwnerKey() {
+  const u = new URL(location.href);
+  if (u.searchParams.has('key')) {
+    u.searchParams.delete('key');
+    history.replaceState(null, '', u.pathname + u.search + u.hash);
+  }
+})();
+
 function getDocId() {
   const p = new URLSearchParams(location.search);
   if (p.get('doc')) return p.get('doc');
