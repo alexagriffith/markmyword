@@ -2,7 +2,8 @@
 //
 // Serves the static viewer and a small JSON API. Base document HTML comes from
 // docs/<id>.html (immutable, trusted). Editor edits + version history live in
-// SQLite. No auth yet (phase 2 adds per-doc passwords).
+// SQLite. Identity is owner-vs-guest (HMAC-signed cookie, OWNER_KEY promotes):
+// anyone may suggest, but editing/restoring/accepting is gated to the doc owner.
 import express from 'express';
 import { readFile, writeFile, readdir, access, mkdir } from 'node:fs/promises';
 import { constants as fsConstants } from 'node:fs';

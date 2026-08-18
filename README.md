@@ -102,10 +102,11 @@ and roll back with one click.
 
 ![Version history](docs/screenshots/06-history.png)
 
-**7 · Download the result.** Export the reviewed HTML with your edits baked back
-into the original markup — no markmyword attributes leak.
+**7 · Download the result.** Export the reviewed file with your edits applied —
+**Interactive + edits** keeps the page's own JavaScript working, or **Edited
+snapshot** freezes a static copy. Either way, no markmyword attributes leak.
 
-![Toolbar with Download](docs/screenshots/07-toolbar.png)
+![Download menu — Interactive + edits, or Edited snapshot](docs/screenshots/07-download.png)
 
 ---
 
@@ -208,6 +209,16 @@ reviewers.
 Backup = copy `app.db` off the volume. Add a built-in file = commit
 `docs/<id>.html`.
 
+**Optional — in-page feedback → GitHub issue.** A small "Feedback" button files
+a GitHub issue from whatever page the reviewer is on. It's off unless you set a
+token; the token stays server-side and is never sent to the browser.
+
+| Var | Default | What it does |
+|-----|---------|--------------|
+| `GITHUB_TOKEN` | *(unset → feedback off)* | Fine-grained PAT scoped to the repo, **Issues: Read and write**. Enables `POST /api/feedback`. |
+| `GITHUB_REPO` | `alexagriffith/markmyword` | `owner/name` the issues are filed in. Set this to your fork. |
+| `FEEDBACK_ALLOWED_HOSTS` | *(your app's host)* | Comma-separated extra hostnames allowed to POST feedback. |
+
 ---
 
 ## 🧭 How it works
@@ -237,7 +248,9 @@ own the documents while the workspace owns the in-flight review.
 ## 🧪 Test
 
 ```bash
-npm test    # anchoring (jsdom) + format probes + grouping
+npm test    # anchoring (jsdom) + format probes + grouping + span selection
+            # + interactive-doc frame bridge (controller / messages / suggest)
+            # + guardrails + feedback → GitHub issue
             # + API / suggestions / upload round-trips (Express + SQLite)
 ```
 
