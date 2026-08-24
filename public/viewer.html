@@ -53,7 +53,7 @@
     #hs-bar .hs-doc { color:#b7b0a3; font-style:italic; font-family: var(--hs-serif); font-size:14px; flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     #hs-bar .hs-spacer { flex:1 1 0; min-width:0; }
     /* Toolbar controls keep their content size (never shrink into each other). */
-    #hs-bar .hs-mode-pill, #hs-bar > button, #hs-bar .hs-share-wrap, #hs-bar .hs-whoami, #hs-bar #hs-status { flex:none; white-space:nowrap; }
+    #hs-bar .hs-mode, #hs-bar > button, #hs-bar .hs-share-wrap, #hs-bar .hs-whoami, #hs-bar #hs-status { flex:none; white-space:nowrap; }
     #hs-status { display:flex; align-items:center; gap:7px; font-size:12.5px; color:#cfcfcf; }
     #hs-status .dot { width:9px; height:9px; border-radius:50%; background:#666; }
     #hs-status.saved .dot { background: var(--hs-ok); }
@@ -96,14 +96,36 @@
     /* Mode selector — Google-Docs-style segmented pill */
     .hs-btn-ic { display:inline-flex; align-items:center; margin-right:5px; vertical-align:-0.14em; }
     #hs-bar button { display:inline-flex; align-items:center; }
-    .hs-mode-pill { display:inline-flex; align-items:center; background:#232323; border:1px solid #444; border-radius:8px; padding:2px; gap:2px; }
-    .hs-mode-opt { background:transparent; color:#cfcfcf; border:none; border-radius:6px; padding:5px 11px; font-size:12.5px; cursor:pointer; line-height:1.1; }
-    .hs-mode-opt .hs-mode-ic { display:inline-flex; align-items:center; margin-right:5px; vertical-align:-0.14em; }
-    .hs-mode-opt:hover { color:#fff; background:#333; }
-    .hs-mode-opt[aria-selected="true"] { background:#7A4F9C; color:#fff; box-shadow:0 1px 2px rgba(0,0,0,.3); }
-    #hs-share-btn, #hs-suggest-btn, #hs-history-btn { background:#2b2b2b; color:#fff; border:1px solid #444; border-radius:6px; padding:5px 10px; font-size:12.5px; cursor:pointer; }
-    #hs-share-btn:hover, #hs-suggest-btn:hover, #hs-history-btn:hover { background:#3a3a3a; }
-    #hs-suggest-count { display:none; margin-left:6px; background:#CD302A; color:#fff; border-radius:10px; padding:0 6px; font-size:11px; font-weight:700; }
+    /* Mode dropdown — one compact trigger + a popup menu (replaces the 3-wide pill) */
+    .hs-mode { position:relative; flex:none; }
+    .hs-mode-trigger { display:inline-flex; align-items:center; gap:6px; background:#232323; color:#efece4; border:1px solid #444; border-radius:8px; padding:5px 9px; font-size:12.5px; cursor:pointer; line-height:1.1; }
+    .hs-mode-trigger:hover { background:#2f2f2f; border-color:#7A4F9C; }
+    .hs-mode-trigger .hs-mode-ic { display:inline-flex; align-items:center; vertical-align:-0.14em; }
+    .hs-mode-cur-lbl { font-weight:600; }
+    .hs-mode-caret { color:#9a938a; font-size:10px; margin-left:1px; }
+    .hs-mode-menu { position:absolute; top:calc(100% + 6px); left:0; z-index:1200; min-width:230px;
+      background:#2A2A2A; border:1px solid #4a4a4a; border-radius:10px; padding:5px; box-shadow:0 12px 32px rgba(0,0,0,.4); }
+    .hs-mode-menu[hidden] { display:none; }
+    .hs-mode-opt { display:flex; flex-direction:column; align-items:flex-start; gap:1px; width:100%; box-sizing:border-box;
+      background:transparent; color:#efece4; border:none; border-radius:7px; padding:7px 9px; font-size:12.5px; cursor:pointer; text-align:left; line-height:1.2; }
+    .hs-mode-opt .hs-mode-ic { display:none; } /* icon shown only on the trigger; menu rows use text */
+    .hs-mode-opt .hs-mode-txt { font-weight:600; }
+    .hs-mode-opt .hs-mode-sub { font-size:11px; color:#9a938a; }
+    .hs-mode-opt:hover { background:#383838; }
+    .hs-mode-opt[aria-checked="true"] { background:#7A4F9C; }
+    .hs-mode-opt[aria-checked="true"] .hs-mode-sub { color:#e6d8f2; }
+    /* A mode that isn't applicable (e.g. Using on a static doc) stays visible but
+       reads as unavailable, with a reason in its subline — never a dead click. */
+    .hs-mode-opt[aria-disabled="true"] { opacity:.5; cursor:not-allowed; }
+    .hs-mode-opt[aria-disabled="true"]:hover { background:transparent; }
+    #hs-share-btn, #hs-suggest-btn, #hs-history-btn, #hs-download-btn { background:#2b2b2b; color:#fff; border:1px solid #444; border-radius:6px; padding:5px 10px; font-size:12.5px; cursor:pointer; }
+    #hs-share-btn:hover, #hs-suggest-btn:hover, #hs-history-btn:hover, #hs-download-btn:hover { background:#3a3a3a; }
+    /* Secondary actions collapse to square icon buttons: label is visually hidden
+       (kept for a11y), icon has no right-margin, the count badge floats top-right. */
+    .hs-icon-btn { position:relative; padding:6px; }
+    .hs-icon-btn .hs-btn-ic { margin-right:0; }
+    .hs-icon-btn .hs-btn-lbl { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+    #hs-suggest-count { display:none; position:absolute; top:-5px; right:-5px; min-width:16px; box-sizing:border-box; text-align:center; background:#CD302A; color:#fff; border:1px solid var(--hs-bar-bg); border-radius:10px; padding:0 4px; font-size:10.5px; line-height:15px; font-weight:700; }
 
     /* Identity chip — who your suggestions are attributed to */
     .hs-whoami { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:#cfcfcf; background:#232323; border:1px solid #3a3a3a; border-radius:20px; padding:3px 10px; cursor:pointer; user-select:none; }
@@ -111,6 +133,11 @@
     .hs-whoami .hs-who-label { font-weight:600; color:#efece4; }
     .hs-whoami .hs-who-edit { display:inline-flex; align-items:center; color:#9a938a; }
     .hs-whoami:hover:not(.hs-who-owner) { border-color:#7A4F9C; }
+    /* Small variant: a round avatar showing the initial. Full name is in the
+       tooltip; the pencil affordance is dropped to save space (click still renames). */
+    .hs-whoami-sm { width:26px; height:26px; padding:0; gap:0; border-radius:50%; justify-content:center; }
+    .hs-whoami-sm .hs-who-label { font-weight:700; font-size:12px; color:#efece4; text-transform:uppercase; }
+    .hs-whoami-sm .hs-who-edit { display:none; }
     /* Share popover (Google-Docs style): opens on Share click, holds the access
        control + the copyable link. Not permanently in the toolbar. */
     .hs-share-wrap { position:relative; flex:none; display:inline-flex; }
@@ -184,10 +211,21 @@
     <span class="hs-title">markmyword</span>
     <span class="hs-doc" id="hs-docname">—</span>
     <span class="hs-spacer"></span>
-    <div id="hs-mode-pill" class="hs-mode-pill" role="tablist" aria-label="Mode" title="Editing applies changes directly; Suggesting proposes tracked changes; Using makes an interactive doc fully clickable (nothing editable)">
-      <button type="button" class="hs-mode-opt" role="tab" data-mode="edit" aria-selected="true"><span class="hs-mode-ic"></span>Editing</button>
-      <button type="button" class="hs-mode-opt" role="tab" data-mode="suggest" aria-selected="false"><span class="hs-mode-ic"></span>Suggesting</button>
-      <button type="button" class="hs-mode-opt" role="tab" data-mode="use" id="hs-mode-use" aria-selected="false" hidden><span class="hs-mode-ic"></span>Using</button>
+    <!-- Mode dropdown (Editing / Suggesting / Using). A single compact control that
+         shows the current mode and opens a menu to switch — far calmer than a
+         3-segment pill. `applyMode()` reads the `mode` variable, so nothing about
+         mode BEHAVIOR changes; this is purely how the mode is chosen. -->
+    <div id="hs-mode" class="hs-mode" title="Editing applies changes directly; Suggesting proposes tracked changes; Using makes an interactive doc fully clickable (nothing editable)">
+      <button type="button" id="hs-mode-trigger" class="hs-mode-trigger" aria-haspopup="menu" aria-expanded="false">
+        <span class="hs-mode-ic" id="hs-mode-cur-ic"></span>
+        <span class="hs-mode-cur-lbl" id="hs-mode-cur-lbl">Editing</span>
+        <span class="hs-mode-caret" aria-hidden="true">▾</span>
+      </button>
+      <div id="hs-mode-menu" class="hs-mode-menu" role="menu" aria-label="Mode" hidden>
+        <button type="button" class="hs-mode-opt" role="menuitemradio" data-mode="edit" aria-checked="true"><span class="hs-mode-ic"></span><span class="hs-mode-txt">Editing</span><span class="hs-mode-sub">Change the document directly</span></button>
+        <button type="button" class="hs-mode-opt" role="menuitemradio" data-mode="suggest" aria-checked="false"><span class="hs-mode-ic"></span><span class="hs-mode-txt">Suggesting</span><span class="hs-mode-sub">Propose tracked changes</span></button>
+        <button type="button" class="hs-mode-opt" role="menuitemradio" data-mode="use" id="hs-mode-use" aria-checked="false"><span class="hs-mode-ic"></span><span class="hs-mode-txt">Using</span><span class="hs-mode-sub">Click links & buttons (interactive docs)</span></button>
+      </div>
     </div>
     <div id="hs-share-wrap" class="hs-share-wrap">
       <button id="hs-share-btn" title="Share this document" aria-haspopup="dialog" aria-expanded="false"><span class="hs-btn-ic" id="hs-share-ic"></span>Share</button>
@@ -211,10 +249,14 @@
         <div id="hs-share-note" class="hs-share-note"></div>
       </div>
     </div>
-    <span id="hs-whoami" class="hs-whoami" title="Who your suggestions are attributed to"></span>
-    <button id="hs-suggest-btn" title="Open suggestions"><span class="hs-btn-ic" id="hs-suggest-ic"></span>Suggestions<span id="hs-suggest-count"></span></button>
-    <button id="hs-history-btn" title="Version history"><span class="hs-btn-ic" id="hs-history-ic"></span>History</button>
-    <button id="hs-download-btn" title="Download the reviewed HTML (edits applied)"><span class="hs-btn-ic" id="hs-download-ic"></span>Download</button>
+    <!-- Identity chip: kept (attributes your edits/suggestions) but shrunk to a
+         small round avatar. Click to rename. Full label lives in the tooltip. -->
+    <span id="hs-whoami" class="hs-whoami hs-whoami-sm" title="Who your suggestions are attributed to"></span>
+    <!-- Secondary actions: icon-only to keep the bar calm; the label stays in the
+         DOM (visually hidden) for screen readers, and title= gives a hover tip. -->
+    <button id="hs-suggest-btn" class="hs-icon-btn" title="Suggestions" aria-label="Open suggestions"><span class="hs-btn-ic" id="hs-suggest-ic"></span><span class="hs-btn-lbl">Suggestions</span><span id="hs-suggest-count"></span></button>
+    <button id="hs-history-btn" class="hs-icon-btn" title="Version history" aria-label="Version history"><span class="hs-btn-ic" id="hs-history-ic"></span><span class="hs-btn-lbl">History</span></button>
+    <button id="hs-download-btn" class="hs-icon-btn" title="Download the reviewed HTML (edits applied)" aria-label="Download the reviewed HTML"><span class="hs-btn-ic" id="hs-download-ic"></span><span class="hs-btn-lbl">Download</span></button>
     <span id="hs-status"><span class="dot"></span><span class="txt">Loading…</span></span>
   </div>
   <div id="hs-warn"></div>

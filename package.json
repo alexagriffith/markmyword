@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node test/anchoring.test.mjs && node test/formats.test.mjs && node test/group.test.mjs && node test/api.test.mjs && node test/suggestions.test.mjs && node test/upload.test.mjs && node test/interactive.test.mjs && node test/source-patch.test.mjs && node test/sha256-fallback.test.mjs && node test/frame-controller.test.mjs && node test/frame-tabs.test.mjs && node test/frame-suggest.test.mjs && node test/frame-messages.test.mjs && node test/span-select.test.mjs && node test/guardrails.test.mjs && node test/feedback.test.mjs && node test/identity.test.mjs && node test/viewer-ui.test.mjs && node test/anchoring-inline.test.mjs && node test/access.test.mjs && node test/scope-css.test.mjs"
+    "test": "node test/anchoring.test.mjs && node test/formats.test.mjs && node test/group.test.mjs && node test/api.test.mjs && node test/suggestions.test.mjs && node test/upload.test.mjs && node test/interactive.test.mjs && node test/source-patch.test.mjs && node test/sha256-fallback.test.mjs && node test/frame-controller.test.mjs && node test/frame-tabs.test.mjs && node test/frame-suggest.test.mjs && node test/frame-messages.test.mjs && node test/span-select.test.mjs && node test/guardrails.test.mjs && node test/feedback.test.mjs && node test/identity.test.mjs && node test/viewer-ui.test.mjs && node test/anchoring-inline.test.mjs && node test/access.test.mjs && node test/scope-css.test.mjs && node test/mode-policy.test.mjs && node test/owner-promotion.test.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",

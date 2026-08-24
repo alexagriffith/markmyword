@@ -196,14 +196,21 @@ export function createApp(db, opts = {}) {
   // Body limit tracks the file-size cap plus headroom for JSON overhead, so a
   // paste up to MAX_DOC_BYTES isn't rejected by the parser before our own check.
   app.use(express.json({ limit: MAX_DOC_BYTES + 256 * 1024 }));
-  app.use(express.static(PUBLIC_DIR));
 
   const noStore = (res) => res.setHeader('Cache-Control', 'no-store');
 
   // Guardrails: identify caller (owner vs guest) on every request, then apply
   // per-IP rate limits to the API route groups. `now` is injectable for tests.
+  //
+  // identify() MUST run BEFORE express.static — owner promotion happens here:
+  // opening `/?key=…` (or `/viewer.html?…&key=…`) sets the mmw_owner cookie. If
+  // static served first, those navigations (they match index.html / viewer.html)
+  // would terminate before identify ran, and the owner cookie would NEVER be set —
+  // the visitor stays a guest and every owner-only action (e.g. changing link
+  // access) 403s. So: json → identify → static.
   const { identify, readLimiter, writeLimiter, uploadLimiter } = makeGuardrails({ now: opts.now });
   app.use(identify);
+  app.use(express.static(PUBLIC_DIR));
   app.get('/api/whoami', (req, res) => {
     noStore(res);
     res.json({ isOwner: !!req.caller?.isOwner, docLimit: LIMITS.GUEST_DOC_LIMIT });
