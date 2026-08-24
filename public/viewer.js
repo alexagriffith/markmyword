@@ -16,6 +16,7 @@ import { parseSuggestTarget } from './frame-messages.js';
 import { resolveSpanSelection } from './span-select.js';
 import { reviewerName, setReviewerName } from './identity.js';
 import { scopeCssText } from './scope-css.js';
+import { modePolicy, canUseMode, defaultMode as pickDefaultMode } from './mode-policy.js';
 
 const $ = (s) => document.querySelector(s);
 const statusEl = $('#hs-status');
@@ -787,12 +788,17 @@ async function submitSuggestion({ anchor, quote, body, kind, spanOcc = -1, baseT
 function paintIdentityChip() {
   const chip = $('#hs-whoami');
   if (!chip) return;
-  const label = escapeHtml(myName);
-  chip.innerHTML = isOwner
-    ? `<span class="hs-who-label">${label}</span>`
-    : `<span class="hs-who-label">${label}</span> <span class="hs-who-edit" title="Rename">${icon('pencil', { size: 12 })}</span>`;
+  // Small avatar: show just the first letter; the full name lives in the tooltip.
+  // (The name still stamps suggestions via myName; this is only the toolbar chip.)
+  const name = myName || 'Anonymous';
+  // Use the first CODE POINT, not charAt(0): an emoji/multibyte first char is a
+  // surrogate pair, and charAt(0) would grab half of it and render a broken "�".
+  const initial = escapeHtml([...name.trim()][0] || '?');
+  chip.innerHTML = `<span class="hs-who-label">${initial}</span>`;
   chip.classList.toggle('hs-who-owner', isOwner);
-  chip.title = isOwner ? 'Your suggestions are attributed to you' : 'Click to change the name on your suggestions';
+  chip.title = isOwner
+    ? `Your edits are attributed to ${name}`
+    : `You: ${name} — click to change the name on your suggestions`;
 }
 
 // A brief bottom-center toast (used by Share). Auto-dismisses.
@@ -1463,41 +1469,81 @@ async function main() {
   $('#hs-download-ic').innerHTML = icon('download', { size: 15 });
   $('#hs-share-ic').innerHTML = icon('link', { size: 15 });
 
-  // Mode pill (Editing / Suggesting / Using), Google-Docs-style segmented control.
-  // "Using" is only meaningful for interactive docs (it lets their own links/tabs/
-  // buttons work by disabling our contenteditable), so reveal it only for those.
+  // Mode dropdown (Editing / Suggesting / Using). A single compact trigger opens a
+  // menu; picking a row sets `mode` and calls applyMode(). All three rows are always
+  // present so the control never "loses" a button — but a row the caller can't use
+  // is DISABLED with a reason, not hidden (hiding is what made the bar feel broken).
+  // The selectability + default decision lives in mode-policy.js (pure + tested).
+  const MODE_UI = {
+    edit:    { label: 'Editing',    icon: 'pencil'  },
+    suggest: { label: 'Suggesting', icon: 'message' },
+    use:     { label: 'Using',      icon: 'cursor'  },
+  };
+  const caps = { canEdit, canSuggest, interactive };
+  const policy = modePolicy(caps);
   const modeOpts = Array.from(document.querySelectorAll('.hs-mode-opt'));
-  const modeIconName = (m) => (m === 'suggest' ? 'message' : m === 'use' ? 'cursor' : 'pencil');
-  for (const btn of modeOpts) {
-    btn.querySelector('.hs-mode-ic').innerHTML = icon(modeIconName(btn.dataset.mode), { size: 14 });
+  const modeTrigger = $('#hs-mode-trigger');
+  const modeMenu = $('#hs-mode-menu');
+  const modeAllowed = (m) => canUseMode(m, caps);
+  // Mark each row enabled/disabled up front (link access & doc type don't change
+  // mid-session), keeping the default sub-line but swapping in the reason when off.
+  for (const p of policy.modes) {
+    const btn = modeOpts.find((b) => b.dataset.mode === p.mode);
+    if (!btn) continue;
+    if (!p.enabled) {
+      btn.setAttribute('aria-disabled', 'true');
+      const sub = btn.querySelector('.hs-mode-sub');
+      if (sub) sub.textContent = p.reason;
+    }
   }
-  const useOpt = $('#hs-mode-use');
-  if (useOpt && interactive) useOpt.hidden = false;
-  // Link access gates which modes a caller may use: hide Editing unless canEdit,
-  // hide Suggesting unless canSuggest. "Using" (interactive-only, read-only nav)
-  // stays available so a view-only guest can still operate an interactive doc's
-  // own controls. A guest on a view-only doc lands in the safe default below.
-  const editOpt = modeOpts.find((b) => b.dataset.mode === 'edit');
-  const suggestOpt = modeOpts.find((b) => b.dataset.mode === 'suggest');
-  if (editOpt) editOpt.hidden = !canEdit;
-  if (suggestOpt) suggestOpt.hidden = !canSuggest;
+  function paintTrigger(m) {
+    const ui = MODE_UI[m] || MODE_UI.edit;
+    const icEl = $('#hs-mode-cur-ic'), lblEl = $('#hs-mode-cur-lbl');
+    if (icEl) icEl.innerHTML = icon(ui.icon, { size: 14 });
+    if (lblEl) lblEl.textContent = ui.label;
+  }
+  function openModeMenu() { if (modeMenu) { modeMenu.hidden = false; modeTrigger?.setAttribute('aria-expanded', 'true'); } }
+  function closeModeMenu() { if (modeMenu) { modeMenu.hidden = true; modeTrigger?.setAttribute('aria-expanded', 'false'); } }
   function selectMode(next) {
+    // Guard: never enter a mode the caller can't use (defence in depth — the row is
+    // also disabled). Fall back to the current mode so nothing silently breaks.
+    if (!modeAllowed(next)) { closeModeMenu(); return; }
     mode = next;
-    for (const btn of modeOpts) btn.setAttribute('aria-selected', String(btn.dataset.mode === next));
+    for (const btn of modeOpts) btn.setAttribute('aria-checked', String(btn.dataset.mode === next));
+    paintTrigger(next);
     applyMode();
     // The suggestions panel opens with Suggesting mode and closes when you leave it
     // (the standalone Suggestions button can still reopen it in any mode).
     document.body.classList.toggle('hs-show-suggest', mode === 'suggest');
     if (mode === 'suggest') loadSuggestions();
   }
+  modeTrigger?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (modeMenu?.hidden) openModeMenu(); else closeModeMenu();
+  });
   for (const btn of modeOpts) {
-    btn.addEventListener('click', () => { if (!btn.hidden) selectMode(btn.dataset.mode); });
+    btn.addEventListener('click', () => {
+      if (btn.getAttribute('aria-disabled') === 'true') return; // disabled row: no-op
+      selectMode(btn.dataset.mode);
+      closeModeMenu();
+    });
   }
-  // Default to the most capable mode the caller is allowed: edit → suggest → use,
-  // and finally a pure-read 'view' for a view-only static doc (so the pill doesn't
-  // falsely show "Suggesting" when suggesting is disallowed).
-  const defaultMode = canEdit ? 'edit' : canSuggest ? 'suggest' : (interactive ? 'use' : 'view');
-  selectMode(defaultMode);
+  // Dismiss the menu on outside click / Escape.
+  document.addEventListener('click', (e) => { if (!e.target.closest('#hs-mode')) closeModeMenu(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModeMenu(); });
+  // Default to the most capable mode the caller is allowed (edit → suggest → use;
+  // see mode-policy.js). A caller with none of those (a view-only static link) gets
+  // 'view': a locked "Viewing" trigger — applyMode() renders read-only, and the menu
+  // holds nothing selectable, so we disable the trigger rather than fake a selection.
+  if (policy.default === 'view') {
+    mode = 'view';
+    applyMode(); // read-only: no contenteditable, no suggest affordances
+    if (modeTrigger) modeTrigger.disabled = true;
+    const lbl = $('#hs-mode-cur-lbl'); if (lbl) lbl.textContent = 'Viewing';
+    const ic = $('#hs-mode-cur-ic'); if (ic) ic.innerHTML = icon('document', { size: 14 });
+  } else {
+    selectMode(policy.default);
+  }
 
   // Share opens a popover (Google-Docs style) holding the copyable link and, for
   // the owner, the "Anyone with the link can…" access control.

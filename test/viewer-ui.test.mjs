@@ -13,15 +13,30 @@ const ok = (c, m) => { if (c) pass++; else { fail++; console.error('  ✗ ' + m)
 const html = readFileSync(new URL('../public/viewer.html', import.meta.url), 'utf8');
 const doc = new JSDOM(html).window.document;
 
-// --- mode pill (Google-Docs-style segmented control) -------------------------
+// --- mode dropdown (compact trigger + popup menu) ----------------------------
+// Declutter: the 3-wide segmented pill was replaced by ONE trigger that opens a
+// menu. All three modes stay present as menu rows (never hidden — an absent button
+// is what made the bar feel broken); an inapplicable mode is disabled at runtime.
+const trigger = doc.getElementById('hs-mode-trigger');
+const menu = doc.getElementById('hs-mode-menu');
+ok(!!trigger, 'mode dropdown has a single trigger button');
+ok(!!menu, 'mode dropdown has a menu');
+ok(menu?.hidden === true, 'mode menu starts hidden (opens on trigger click)');
+ok(!!doc.getElementById('hs-mode-cur-lbl'), 'trigger shows the current mode label');
+ok(!!doc.getElementById('hs-mode-cur-ic'), 'trigger has an icon slot for the current mode');
 const opts = Array.from(doc.querySelectorAll('.hs-mode-opt'));
 const modes = opts.map((b) => b.dataset.mode);
-ok(opts.length === 3, `mode pill has 3 options (got ${opts.length})`);
-ok(['edit', 'suggest', 'use'].every((m) => modes.includes(m)), `pill covers edit/suggest/use (got ${modes.join(',')})`);
-ok(doc.getElementById('hs-mode-use')?.hidden === true, '"Using" option starts hidden (revealed only for interactive docs)');
-// The old <select id="hs-mode"> must be gone so viewer.js can't bind the wrong control.
+ok(opts.length === 3, `mode menu has 3 rows (got ${opts.length})`);
+ok(['edit', 'suggest', 'use'].every((m) => modes.includes(m)), `menu covers edit/suggest/use (got ${modes.join(',')})`);
+// All three rows are present in the DOM (visibility is by runtime aria-disabled,
+// not by `hidden`); the "Using" row must NOT start hidden anymore.
+ok(doc.getElementById('hs-mode-use')?.hidden !== true, '"Using" row is present (not hidden in markup)');
+ok(opts.every((b) => b.getAttribute('role') === 'menuitemradio'), 'each mode row is a menuitemradio');
+ok(opts.every((b) => b.querySelector('.hs-mode-txt')), 'each mode row has a text label');
+// The old segmented pill container + any old <select> must be gone so the wiring
+// can't bind a stale control.
+ok(!doc.getElementById('hs-mode-pill'), 'old segmented pill container is removed');
 ok(!doc.querySelector('select#hs-mode'), 'old mode <select> is removed');
-ok(opts.every((b) => b.querySelector('.hs-mode-ic')), 'each pill option has an icon slot');
 
 // --- Share button + popover (Google-Docs style) ------------------------------
 ok(!!doc.getElementById('hs-share-btn'), 'Share button exists');
@@ -34,7 +49,10 @@ ok(!!doc.getElementById('hs-share-link'), 'popover has a copyable link field');
 ok(!!doc.getElementById('hs-share-copy'), 'popover has a Copy-link button');
 
 // --- identity chip + toast ---------------------------------------------------
-ok(!!doc.getElementById('hs-whoami'), 'identity chip exists');
+// Kept, but shrunk to a small round avatar (class hs-whoami-sm) to declutter.
+const whoami = doc.getElementById('hs-whoami');
+ok(!!whoami, 'identity chip exists');
+ok(whoami?.classList.contains('hs-whoami-sm'), 'identity chip uses the small (avatar) variant');
 ok(!!doc.getElementById('hs-toast'), 'copy toast element exists');
 
 // --- link access control (owner-only, lives INSIDE the Share popover) ---------
