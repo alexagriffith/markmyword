@@ -150,22 +150,38 @@ function hasDirectText(el) {
   return false;
 }
 
+// Any non-whitespace text this element renders, whether it sits directly on the
+// element or wholly inside INLINE children (strong/span/code/a/em…). We can't just
+// check hasDirectText: many real docs wrap a cell's or card's entire text in an
+// inline element — <td><strong>Recommend / GPU sizer</strong></td>, a <div class=
+// "stat"><strong>21 Aug</strong><span>…</span></div>, or <pre><code>diagram</code>
+// </pre>. Those have NO direct text, yet the element is exactly the editable unit
+// (there's no nested BLOCK to descend into). hasOwnText treats such an element as
+// text-bearing so it becomes a leaf. This mirrors the in-frame controller's broader
+// hybrid rule, keeping static-doc and interactive-doc editability consistent.
+function hasOwnText(el) {
+  return normalizeText(el.textContent) !== '';
+}
+
 function containsBlockCandidate(el) {
   for (const child of el.children) {
     const tag = child.tagName.toLowerCase();
     if (SKIP_TAGS.has(tag)) continue;
-    if (BLOCK_TAGS.has(tag) && (hasDirectText(child) || containsBlockCandidate(child))) return true;
+    if (BLOCK_TAGS.has(tag) && (hasOwnText(child) || containsBlockCandidate(child))) return true;
     if (containsBlockCandidate(child)) return true;
   }
   return false;
 }
 
-// A text-bearing leaf: has direct text AND contains no nested block candidate,
-// so we edit the innermost element (not a whole nested-table region).
+// A text-bearing leaf: has its own text (direct OR in inline-only children) AND
+// contains no nested block candidate, so we edit the innermost block-level unit
+// (never a wrapper of other blocks, and never fragmenting a sentence at an inline
+// tag). Anchoring is by content hash of normalized textContent, so an inline-only
+// leaf hashes identically whether its text is bare or wrapped in <strong>/<code>.
 export function isEditableLeaf(el) {
   const tag = el.tagName.toLowerCase();
   if (SKIP_TAGS.has(tag) || !BLOCK_TAGS.has(tag)) return false;
-  if (!hasDirectText(el)) return false;
+  if (!hasOwnText(el)) return false;
   if (containsBlockCandidate(el)) return false;
   return true;
 }

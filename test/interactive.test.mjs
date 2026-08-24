@@ -57,11 +57,14 @@ try {
   ok((await r.json()).interactive === true, 'uploaded as interactive');
 
   // Compute anchors the SAME way the download rebuild does: assignAnchors over the
-  // ORIGINAL markup (anchoring.js, unchanged). BLOCK_TAG leaves with direct text
-  // (the <h1>, the <p>) are anchored; the JS-generated <div id="live"> text is not
-  // (its text doesn't exist in the original markup); and the inline-nested badge
-  // (<span> inside <div>, no direct block text) is deliberately NOT anchored by the
-  // base pipeline — broadening to inline badges is the frame-controller's job.
+  // ORIGINAL markup (anchoring.js). BLOCK_TAG leaves are anchored; the JS-generated
+  // <div id="live"> text is NOT (its text doesn't exist in the original markup).
+  // The inline-nested badge (<div class="badge"><span>…</span></div>, whose text is
+  // wholly inside an inline child) IS now anchored by the base pipeline too: it's a
+  // block with its own text and no nested block, so it's one editable unit — the
+  // same rule that makes static-doc KPI cards / <pre><code> blocks editable. Because
+  // the anchor is by content hash, the download rebuild computes the identical anchor
+  // and an edit to the badge round-trips (verified below).
   const origDom = new JSDOM(html);
   const origMap = await assignAnchors(origDom.window.document.body);
   let paraAnchor = null, headingAnchor = null, liveAnchor = null, badgeAnchor = null;
@@ -75,11 +78,16 @@ try {
   ok(paraAnchor !== null, 'paragraph is an anchorable markup leaf');
   ok(headingAnchor !== null, 'heading is an anchorable markup leaf');
   ok(liveAnchor === null, 'JS-generated text has NO anchor in the original markup (not editable)');
-  ok(badgeAnchor === null, 'inline-nested badge is NOT anchored by the base download pipeline');
+  ok(badgeAnchor !== null, 'inline-nested badge IS an editable leaf (its text is its own, no nested block)');
 
   // Edit the paragraph via /api/edit (stores escaped overlay), as the bridge would.
   r = await post(`/api/edit/${TMP_ID}`, { anchor: paraAnchor, text: 'Revised paragraph.' });
   ok(r.status === 200, 'edit stored -> 200');
+
+  // Also edit the inline-nested badge to prove its anchor round-trips: the download
+  // rebuild recomputes the same content-hash anchor and applies this edit.
+  r = await post(`/api/edit/${TMP_ID}`, { anchor: badgeAnchor, text: 'Verified by Red Hat' });
+  ok(r.status === 200, 'badge edit stored -> 200');
 
   // --- reproduce the viewer's downloadHtml rebuild for an interactive doc ---
   const rawHtml = (await (await fetch(base + `/api/raw/${TMP_ID}`)).json()).rawHtml;
@@ -109,8 +117,10 @@ try {
   ok(out.includes('Revised paragraph.'), 'markup text edit is baked into the download');
   ok(!out.includes('Intro paragraph.'), 'old paragraph text replaced, not duplicated');
   ok(out.includes('Model Overview'), 'unedited markup preserved');
-  // Badge markup is untouched (it wasn't editable, so it rides through verbatim).
-  ok(out.includes('Validated by Red Hat'), 'inline badge markup preserved verbatim in download');
+  // Badge edit round-tripped: the download recomputed the badge's content-hash
+  // anchor and applied the overlay, replacing the text inside its inline <span>.
+  ok(out.includes('Verified by Red Hat'), 'inline badge edit is baked into the download');
+  ok(!out.includes('Validated by Red Hat'), 'old badge text replaced, not duplicated');
   // 3. The runtime-generated TEXT is not present in the rebuilt DOM (only the JS
   //    that would produce it). The <div id="live"> is empty in the download.
   const liveDiv = new JSDOM(out).window.document.getElementById('live');

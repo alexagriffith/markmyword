@@ -61,6 +61,15 @@ export function openDb(path = process.env.HS_DB_PATH || './data/app.db') {
   const cols = db.prepare('PRAGMA table_info(suggestions)').all().map((c) => c.name);
   if (!cols.includes('span_occ')) db.exec('ALTER TABLE suggestions ADD COLUMN span_occ INTEGER NOT NULL DEFAULT -1');
   if (!cols.includes('base_text')) db.exec("ALTER TABLE suggestions ADD COLUMN base_text TEXT NOT NULL DEFAULT ''");
+
+  // Link access control (Google-Docs "Anyone with the link can…"): a per-doc level
+  // the owner sets, gating what a GUEST who has the link may do. Default 'suggest'
+  // preserves prior behavior (suggesting was open to anyone). Existing rows migrate
+  // to 'suggest' via the column default, so no doc silently locks or opens up.
+  const ownerCols = db.prepare('PRAGMA table_info(doc_owners)').all().map((c) => c.name);
+  if (!ownerCols.includes('access_level')) {
+    db.exec("ALTER TABLE doc_owners ADD COLUMN access_level TEXT NOT NULL DEFAULT 'suggest'");
+  }
   return db;
 }
 
@@ -208,6 +217,33 @@ export function setDocOwner(db, docId, ownerToken, ts) {
 
 export function getDocOwner(db, docId) {
   return db.prepare('SELECT owner_token FROM doc_owners WHERE doc_id = ?').get(docId)?.owner_token ?? null;
+}
+
+// --- link access control (per-doc guest capability) ---
+// The levels a guest-with-the-link may be granted, least→most capable:
+//   'view'    read only (no suggest, no edit)
+//   'suggest' read + propose changes (owner accepts/rejects) — default
+//   'edit'    read + suggest + directly edit the doc
+// The owner (and the doc's guest-owner) always has full edit regardless of level;
+// this only controls what OTHER guests may do.
+export const ACCESS_LEVELS = ['view', 'suggest', 'edit'];
+export const DEFAULT_ACCESS = 'suggest';
+
+// Effective access level for a doc. Docs with no owner row (seed/demo) return the
+// default so they behave exactly as before this feature existed.
+export function getDocAccess(db, docId) {
+  const row = db.prepare('SELECT access_level FROM doc_owners WHERE doc_id = ?').get(docId);
+  const lvl = row?.access_level;
+  return ACCESS_LEVELS.includes(lvl) ? lvl : DEFAULT_ACCESS;
+}
+
+// Set a doc's access level. Only updates an existing owner row (the caller has
+// already checked the doc exists and the caller may set it). Returns true if a
+// row was updated, false if the doc has no owner row to attach the level to.
+export function setDocAccess(db, docId, level) {
+  if (!ACCESS_LEVELS.includes(level)) throw new Error('invalid_access_level');
+  const r = db.prepare('UPDATE doc_owners SET access_level = ? WHERE doc_id = ?').run(level, docId);
+  return r.changes > 0;
 }
 
 // Ownership lookup for the whole owners table, as { docId: ownerToken }. Used to

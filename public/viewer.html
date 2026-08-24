@@ -47,9 +47,13 @@
       background: var(--hs-bar-bg); color:#faf9f5; font-size:13px;
       border-bottom:1px solid rgba(0,0,0,.35);
     }
-    #hs-bar .hs-title { font-family: var(--hs-serif); font-weight:600; font-size:16px; letter-spacing:-.01em; }
-    #hs-bar .hs-doc { color:#b7b0a3; font-style:italic; font-family: var(--hs-serif); font-size:14px; }
-    #hs-bar .hs-spacer { flex:1; }
+    #hs-bar .hs-title { font-family: var(--hs-serif); font-weight:600; font-size:16px; letter-spacing:-.01em; flex:none; }
+    /* Doc name is the only flexible item: it truncates so the controls to the right
+       always keep their natural size and never overlap on a narrow window. */
+    #hs-bar .hs-doc { color:#b7b0a3; font-style:italic; font-family: var(--hs-serif); font-size:14px; flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    #hs-bar .hs-spacer { flex:1 1 0; min-width:0; }
+    /* Toolbar controls keep their content size (never shrink into each other). */
+    #hs-bar .hs-mode-pill, #hs-bar > button, #hs-bar .hs-share-wrap, #hs-bar .hs-whoami, #hs-bar #hs-status { flex:none; white-space:nowrap; }
     #hs-status { display:flex; align-items:center; gap:7px; font-size:12.5px; color:#cfcfcf; }
     #hs-status .dot { width:9px; height:9px; border-radius:50%; background:#666; }
     #hs-status.saved .dot { background: var(--hs-ok); }
@@ -89,15 +93,44 @@
     .hs-diff-ins { background:#d7f0d7; color:#1c5c1c; text-decoration:none; border-radius:2px; }
     .hs-diff-del { background:#f7d4d4; color:#8a1c1c; text-decoration:line-through; border-radius:2px; }
 
-    /* Mode selector */
-    .hs-mode-wrap { display:flex; align-items:center; gap:6px; }
-    .hs-mode-icon { display:inline-flex; align-items:center; color:#cfcfcf; }
+    /* Mode selector — Google-Docs-style segmented pill */
     .hs-btn-ic { display:inline-flex; align-items:center; margin-right:5px; vertical-align:-0.14em; }
     #hs-bar button { display:inline-flex; align-items:center; }
-    .hs-mode-wrap select { background:#2b2b2b; color:#fff; border:1px solid #444; border-radius:6px; padding:5px 8px; font-size:12.5px; cursor:pointer; }
-    #hs-suggest-btn, #hs-history-btn { background:#2b2b2b; color:#fff; border:1px solid #444; border-radius:6px; padding:5px 10px; font-size:12.5px; cursor:pointer; }
-    #hs-suggest-btn:hover, #hs-history-btn:hover { background:#3a3a3a; }
+    .hs-mode-pill { display:inline-flex; align-items:center; background:#232323; border:1px solid #444; border-radius:8px; padding:2px; gap:2px; }
+    .hs-mode-opt { background:transparent; color:#cfcfcf; border:none; border-radius:6px; padding:5px 11px; font-size:12.5px; cursor:pointer; line-height:1.1; }
+    .hs-mode-opt .hs-mode-ic { display:inline-flex; align-items:center; margin-right:5px; vertical-align:-0.14em; }
+    .hs-mode-opt:hover { color:#fff; background:#333; }
+    .hs-mode-opt[aria-selected="true"] { background:#7A4F9C; color:#fff; box-shadow:0 1px 2px rgba(0,0,0,.3); }
+    #hs-share-btn, #hs-suggest-btn, #hs-history-btn { background:#2b2b2b; color:#fff; border:1px solid #444; border-radius:6px; padding:5px 10px; font-size:12.5px; cursor:pointer; }
+    #hs-share-btn:hover, #hs-suggest-btn:hover, #hs-history-btn:hover { background:#3a3a3a; }
     #hs-suggest-count { display:none; margin-left:6px; background:#CD302A; color:#fff; border-radius:10px; padding:0 6px; font-size:11px; font-weight:700; }
+
+    /* Identity chip — who your suggestions are attributed to */
+    .hs-whoami { display:inline-flex; align-items:center; gap:5px; font-size:12px; color:#cfcfcf; background:#232323; border:1px solid #3a3a3a; border-radius:20px; padding:3px 10px; cursor:pointer; user-select:none; }
+    .hs-whoami.hs-who-owner { cursor:default; }
+    .hs-whoami .hs-who-label { font-weight:600; color:#efece4; }
+    .hs-whoami .hs-who-edit { display:inline-flex; align-items:center; color:#9a938a; }
+    .hs-whoami:hover:not(.hs-who-owner) { border-color:#7A4F9C; }
+    /* Share popover (Google-Docs style): opens on Share click, holds the access
+       control + the copyable link. Not permanently in the toolbar. */
+    .hs-share-wrap { position:relative; flex:none; display:inline-flex; }
+    .hs-share-pop { position:absolute; top:calc(100% + 8px); right:0; z-index:1200; width:320px;
+      background:#2A2A2A; color:#efece4; border:1px solid #4a4a4a; border-radius:10px; padding:14px;
+      box-shadow:0 12px 32px rgba(0,0,0,.4); text-align:left; }
+    .hs-share-title { font-size:13.5px; font-weight:600; margin-bottom:10px; color:#faf9f5; }
+    .hs-access-row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px; }
+    .hs-access-row .hs-access-lbl { font-size:12.5px; color:#cfcfcf; }
+    .hs-access-row select { background:#1f1f1f; color:#efece4; border:1px solid #555; border-radius:6px; padding:5px 8px; font-size:12.5px; cursor:pointer; }
+    .hs-access-row select:hover { border-color:#7A4F9C; }
+    .hs-share-linkrow { display:flex; gap:6px; }
+    .hs-share-link { flex:1; min-width:0; background:#1f1f1f; color:#cfcfcf; border:1px solid #555; border-radius:6px; padding:6px 8px; font-size:12px; }
+    .hs-share-copy { flex:none; background:#7A4F9C; color:#fff; border:1px solid #7A4F9C; border-radius:6px; padding:6px 12px; font-size:12.5px; cursor:pointer; }
+    .hs-share-copy:hover { background:#8a5cae; }
+    .hs-share-note { margin-top:9px; font-size:11.5px; color:#9a938a; line-height:1.45; }
+
+    /* Share "copied" toast */
+    #hs-toast { position:fixed; left:50%; bottom:28px; transform:translateX(-50%) translateY(8px); background:#2A2A2A; color:#fff; border:1px solid #444; border-radius:8px; padding:9px 16px; font-size:13px; box-shadow:0 8px 24px rgba(0,0,0,.3); opacity:0; pointer-events:none; transition:opacity .16s, transform .16s; z-index:2000; }
+    #hs-toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
 
     /* Suggest mode: blocks get a distinct hover affordance (click to suggest) */
     body.hs-suggest [data-hs-block], body.hs-suggest [data-hs-anchor] { border-radius:2px; transition: background-color .12s, outline-color .12s; outline:1px dashed transparent; }
@@ -151,14 +184,34 @@
     <span class="hs-title">markmyword</span>
     <span class="hs-doc" id="hs-docname">—</span>
     <span class="hs-spacer"></span>
-    <label class="hs-mode-wrap" title="Editing applies changes directly; Suggesting proposes tracked changes; Using makes an interactive doc fully clickable (nothing editable)">
-      <span id="hs-mode-icon" class="hs-mode-icon" aria-hidden="true"></span>
-      <select id="hs-mode">
-        <option value="edit">Editing</option>
-        <option value="suggest">Suggesting</option>
-        <option value="use" id="hs-mode-use" hidden>Using (interactive)</option>
-      </select>
-    </label>
+    <div id="hs-mode-pill" class="hs-mode-pill" role="tablist" aria-label="Mode" title="Editing applies changes directly; Suggesting proposes tracked changes; Using makes an interactive doc fully clickable (nothing editable)">
+      <button type="button" class="hs-mode-opt" role="tab" data-mode="edit" aria-selected="true"><span class="hs-mode-ic"></span>Editing</button>
+      <button type="button" class="hs-mode-opt" role="tab" data-mode="suggest" aria-selected="false"><span class="hs-mode-ic"></span>Suggesting</button>
+      <button type="button" class="hs-mode-opt" role="tab" data-mode="use" id="hs-mode-use" aria-selected="false" hidden><span class="hs-mode-ic"></span>Using</button>
+    </div>
+    <div id="hs-share-wrap" class="hs-share-wrap">
+      <button id="hs-share-btn" title="Share this document" aria-haspopup="dialog" aria-expanded="false"><span class="hs-btn-ic" id="hs-share-ic"></span>Share</button>
+      <!-- Share popover: opens only when Share is clicked (Google-Docs style). The
+           access control lives HERE, not permanently in the toolbar. -->
+      <div id="hs-share-pop" class="hs-share-pop" role="dialog" aria-label="Share" hidden>
+        <div class="hs-share-title">Share this document</div>
+        <!-- Access row is shown only to the doc owner (populated by viewer.js). -->
+        <label id="hs-access-row" class="hs-access-row" hidden>
+          <span class="hs-access-lbl">Anyone with the link</span>
+          <select id="hs-access-sel" aria-label="Anyone with the link can">
+            <option value="view">can view</option>
+            <option value="suggest">can suggest</option>
+            <option value="edit">can edit</option>
+          </select>
+        </label>
+        <div class="hs-share-linkrow">
+          <input id="hs-share-link" class="hs-share-link" type="text" readonly aria-label="Shareable link" />
+          <button id="hs-share-copy" class="hs-share-copy" type="button">Copy link</button>
+        </div>
+        <div id="hs-share-note" class="hs-share-note"></div>
+      </div>
+    </div>
+    <span id="hs-whoami" class="hs-whoami" title="Who your suggestions are attributed to"></span>
     <button id="hs-suggest-btn" title="Open suggestions"><span class="hs-btn-ic" id="hs-suggest-ic"></span>Suggestions<span id="hs-suggest-count"></span></button>
     <button id="hs-history-btn" title="Version history"><span class="hs-btn-ic" id="hs-history-ic"></span>History</button>
     <button id="hs-download-btn" title="Download the reviewed HTML (edits applied)"><span class="hs-btn-ic" id="hs-download-ic"></span>Download</button>
@@ -168,6 +221,7 @@
   <aside id="hs-versions"><h3>Version history</h3></aside>
   <aside id="hs-suggestions"><h3>Suggestions</h3></aside>
   <div id="hs-doc-root"><div id="hs-empty">Loading document…</div></div>
+  <div id="hs-toast" role="status" aria-live="polite"></div>
 
   <script type="module" src="/viewer.js"></script>
   <script type="module" src="/feedback.js"></script>

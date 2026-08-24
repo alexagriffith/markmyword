@@ -14,6 +14,8 @@ import { resolveAssets, forceRevealContent, summarizeMissing, healImageAssets } 
 import { icon } from './icons.js';
 import { parseSuggestTarget } from './frame-messages.js';
 import { resolveSpanSelection } from './span-select.js';
+import { reviewerName, setReviewerName } from './identity.js';
+import { scopeCssText } from './scope-css.js';
 
 const $ = (s) => document.querySelector(s);
 const statusEl = $('#hs-status');
@@ -32,9 +34,22 @@ let commentMap = new Map();         // comment anchor -> element (non-text, comm
 let baseText = new Map();            // anchor -> ORIGINAL template text (pre-overlay)
 const pending = new Map();          // anchor -> latest text awaiting save
 const saveTimers = new Map();
+const saveRetries = new Map();      // anchor -> consecutive transient-failure count
+const SAVE_MAX_RETRIES = 6;         // ~15s of 2.5s backoff before we stop and warn
 let inflight = 0;
 let suggestions = [];               // open suggestions for this doc
 let pollTimer = null;
+let isOwner = false;                 // are we the doc owner (vs. a reviewer)?
+let myName = 'Owner';               // display name stamped on suggestions we make
+
+// Link access control (Google-Docs "Anyone with the link can…"). `access` is the
+// doc's level (view | suggest | edit); `canEdit`/`canSuggest` are what THIS caller
+// may do given that level; `isDocOwner` gates showing the access picker. Defaults
+// match the server's default so nothing is falsely locked before /api/doc returns.
+let access = 'suggest';
+let canEdit = true;
+let canSuggest = true;
+let isDocOwner = false;
 
 // Interactive (JS) docs render inside a sandboxed iframe instead of inline. When
 // set, `frame` is that iframe and `frameAnchors` is the set of editable anchors
@@ -183,9 +198,23 @@ function writeGroupText(container, text) {
 
 function renderBaseHtml(baseHtml) {
   const parsed = new DOMParser().parseFromString(baseHtml, 'text/html');
-  // Preserve the deliverable's own styling (doc HTML is trusted).
-  const headBits = parsed.head ? parsed.head.querySelectorAll('style, link[rel="stylesheet"]') : [];
-  headBits.forEach((n) => document.head.appendChild(n.cloneNode(true)));
+  // Preserve the deliverable's own styling (doc HTML is trusted) — but SCOPE it to
+  // #hs-doc-root so it can't leak onto the viewer chrome (see DOC_SCOPE note above).
+  const headBits = parsed.head
+    ? parsed.head.querySelectorAll('style, link[rel="stylesheet"]')
+    : [];
+  headBits.forEach((n) => {
+    if (n.tagName === 'STYLE') {
+      const scoped = document.createElement('style');
+      scoped.textContent = scopeCssText(n.textContent || '');
+      document.head.appendChild(scoped);
+    } else {
+      // External stylesheet: we can't rewrite its rules synchronously, so we
+      // can't scope it. Leave it as-is — deliverables are self-contained inline
+      // CSS in practice; a linked sheet is rare and still trusted doc content.
+      document.head.appendChild(n.cloneNode(true));
+    }
+  });
   root.innerHTML = '';
   const kids = parsed.body ? Array.from(parsed.body.childNodes) : [];
   for (const n of kids) root.appendChild(document.importNode(n, true));
@@ -210,8 +239,12 @@ function applyOverlay(overlay) {
 //  - edit:    blocks are contenteditable (direct editing)
 //  - suggest: blocks are NOT editable; clicking one opens a suggestion popup
 function applyMode() {
-  const editing = mode === 'edit';
-  const suggesting = mode === 'suggest';
+  // A caller with neither edit nor suggest rights (view-only link) is read-only no
+  // matter what mode string is set: never contenteditable, never a suggest popup.
+  // The server enforces this too; this keeps the UI honest and clickless.
+  const readOnly = !canEdit && !canSuggest;
+  const editing = mode === 'edit' && !readOnly;
+  const suggesting = mode === 'suggest' && !readOnly;
   document.body.classList.toggle('hs-edit', editing);
   document.body.classList.toggle('hs-suggest', suggesting);
   // Interactive docs live in the sandboxed frame; drive editability + suggest
@@ -253,15 +286,65 @@ async function saveBlock(anchor) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ anchor, text }),
     });
-    if (!res.ok) throw new Error(`save ${res.status}`);
-    inflight--;
-    if (inflight === 0 && pending.size === 0) setStatus('saved', 'All changes saved');
+    if (res.ok) {
+      saveRetries.delete(anchor); // clean success resets the transient-failure count
+      // This call still counts toward inflight until the finally below, so "last
+      // one out" is inflight === 1 here, not 0.
+      if (inflight === 1 && pending.size === 0) setStatus('saved', 'All changes saved');
+      return;
+    }
+    // A 4xx is a PERMANENT refusal (not permitted, bad request), not a blip:
+    // retrying it just spins forever — the "Saving→Failing→Saving→Failing" loop
+    // that silently throws the edit away on reload. Stop, and say so honestly so
+    // the reviewer isn't left thinking their work was saved.
+    if (res.status >= 400 && res.status < 500) {
+      let why = '';
+      try { why = (await res.json())?.error || ''; } catch {}
+      if (res.status === 403 || why === 'edit_not_allowed' || why === 'not_your_doc') {
+        // The most common case: a guest on a doc they can't directly edit. Point
+        // them at Suggesting (which they usually CAN do) instead of a dead retry.
+        setStatus('error', "You don't have edit access — switch to Suggesting to propose changes.");
+      } else {
+        setStatus('error', `Couldn’t save this change (${why || res.status}).`);
+      }
+      // Any 4xx means this edit will NEVER be stored: roll the block back to its
+      // last saved text so the doc doesn't keep showing an edit that vanishes on
+      // reload (misleading the reviewer into thinking it saved).
+      revertBlockToSaved(anchor);
+      saveRetries.delete(anchor);
+      return; // do NOT re-queue: the retry can never succeed
+    }
+    // 5xx / network-shaped failure: genuinely transient — bounded retry.
+    throw new Error(`save ${res.status}`);
   } catch {
-    inflight--;
-    setStatus('error', 'Save failed — retrying');
+    // Bounded retry: a persistent 5xx/offline must not spin forever (the same
+    // failure class as the original 4xx loop). Give up after SAVE_MAX_RETRIES and
+    // keep the text pending so a later successful edit to the block still flushes.
+    const tries = (saveRetries.get(anchor) || 0) + 1;
+    saveRetries.set(anchor, tries);
     pending.set(anchor, text);
-    setTimeout(() => saveBlock(anchor), 2500);
+    if (tries <= SAVE_MAX_RETRIES) {
+      setStatus('error', 'Save failed — retrying');
+      setTimeout(() => saveBlock(anchor), 2500);
+    } else {
+      setStatus('error', 'Save keeps failing — your change is unsaved. Check your connection.');
+    }
+  } finally {
+    inflight--;
   }
+}
+
+// Roll a block's on-screen text back to the last server-confirmed value after a
+// refused edit, so the doc doesn't keep showing an edit that was never stored
+// (which would vanish on reload and confuse the reviewer).
+function revertBlockToSaved(anchor) {
+  const el = anchorMap.get(anchor);
+  if (!el) return;
+  const saved = currentOverlay?.[anchor]?.text;
+  const text = typeof saved === 'string' ? decodeEntities(saved) : baseText.get(anchor);
+  if (typeof text !== 'string') return;
+  if (isGroup(el)) writeGroupText(el, text);
+  else el.textContent = text;
 }
 
 // IMPORTANT: editing text changes the element's textContent, which would change
@@ -688,7 +771,7 @@ async function submitSuggestion({ anchor, quote, body, kind, spanOcc = -1, baseT
   try {
     const res = await fetch(`/api/suggest/${encodeURIComponent(docId)}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ anchor, quote, body, kind, author: 'owner', spanOcc, baseText: bt }),
+      body: JSON.stringify({ anchor, quote, body, kind, author: myName, spanOcc, baseText: bt }),
     });
     if (!res.ok) throw new Error();
     setStatus('saved', 'Suggestion added');
@@ -697,6 +780,140 @@ async function submitSuggestion({ anchor, quote, body, kind, spanOcc = -1, baseT
   } catch {
     setStatus('error', 'Suggestion failed');
   }
+}
+
+// Render the toolbar identity chip ("You: <name>"). Reviewers get a pencil hint
+// that it's editable; the owner's is static.
+function paintIdentityChip() {
+  const chip = $('#hs-whoami');
+  if (!chip) return;
+  const label = escapeHtml(myName);
+  chip.innerHTML = isOwner
+    ? `<span class="hs-who-label">${label}</span>`
+    : `<span class="hs-who-label">${label}</span> <span class="hs-who-edit" title="Rename">${icon('pencil', { size: 12 })}</span>`;
+  chip.classList.toggle('hs-who-owner', isOwner);
+  chip.title = isOwner ? 'Your suggestions are attributed to you' : 'Click to change the name on your suggestions';
+}
+
+// A brief bottom-center toast (used by Share). Auto-dismisses.
+let toastTimer = null;
+function toast(msg) {
+  const el = $('#hs-toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add('show');
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 1800);
+}
+
+// The canonical shareable URL for this doc — never leaks a ?key= if one is present.
+function shareLink() {
+  const u = new URL(location.href);
+  u.searchParams.delete('key');
+  return u.href;
+}
+
+// Copy a string to the clipboard, with a legacy execCommand fallback for older
+// browsers / insecure contexts. Returns true on success.
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    }
+    return true;
+  } catch { return false; }
+}
+
+// Open/close the Share popover (Google-Docs style). Opening fills the link field
+// and — for the doc owner — the access-level control. `note` describes the current
+// access so a reviewer understands what the link grants.
+function openSharePopover() {
+  const pop = $('#hs-share-pop');
+  const btn = $('#hs-share-btn');
+  if (!pop) return;
+  $('#hs-share-link').value = shareLink();
+  const row = $('#hs-access-row');
+  if (row) {
+    row.hidden = !isDocOwner;
+    const sel = $('#hs-access-sel');
+    if (sel) sel.value = access;
+  }
+  paintShareNote();
+  pop.hidden = false;
+  btn?.setAttribute('aria-expanded', 'true');
+}
+function closeSharePopover() {
+  const pop = $('#hs-share-pop');
+  if (!pop || pop.hidden) return;
+  pop.hidden = true;
+  $('#hs-share-btn')?.setAttribute('aria-expanded', 'false');
+}
+function toggleSharePopover() {
+  const pop = $('#hs-share-pop');
+  if (!pop) return;
+  if (pop.hidden) openSharePopover(); else closeSharePopover();
+}
+
+// Human-readable note of what the link currently grants.
+function paintShareNote() {
+  const note = $('#hs-share-note');
+  if (!note) return;
+  const desc = {
+    view: 'Anyone with the link can view this document.',
+    suggest: 'Anyone with the link can view and suggest changes.',
+    edit: 'Anyone with the link can view, suggest, and edit directly.',
+  };
+  note.textContent = desc[access] || desc.suggest;
+}
+
+// Wire the Share popover: open/close, copy the link, and (owner only) change the
+// link-access level from inside the popover. Changing the level PUTs it and re-boots
+// so the mode pill + editability reflect the new capabilities right away. Guests
+// don't see the access row (and the server rejects their PUT regardless).
+function wireShare() {
+  const btn = $('#hs-share-btn');
+  const pop = $('#hs-share-pop');
+  if (!btn || !pop) return;
+
+  btn.addEventListener('click', (e) => { e.stopPropagation(); toggleSharePopover(); });
+
+  $('#hs-share-copy')?.addEventListener('click', async () => {
+    const okCopy = await copyText(shareLink());
+    toast(okCopy ? 'Link copied — share it with reviewers' : 'Copy failed — select the link and copy it');
+  });
+
+  const sel = $('#hs-access-sel');
+  sel?.addEventListener('change', async () => {
+    const level = sel.value;
+    const prev = access;
+    try {
+      const res = await fetch(`/api/access/${encodeURIComponent(docId)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ level }),
+      });
+      if (!res.ok) throw new Error(`access ${res.status}`);
+      access = level;
+      paintShareNote();
+      const labels = { view: 'view only', suggest: 'suggest', edit: 'edit' };
+      toast(`Link access set to: ${labels[level] || level}`);
+      // Re-boot so canEdit/canSuggest and the mode pill reflect the new level.
+      await boot();
+    } catch {
+      sel.value = prev; // revert the control on failure
+      toast('Could not change link access');
+    }
+  });
+
+  // Clicks inside the popover shouldn't close it; outside clicks + Escape do.
+  pop.addEventListener('click', (e) => e.stopPropagation());
+  document.addEventListener('click', () => closeSharePopover());
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSharePopover(); });
 }
 
 async function loadSuggestions() {
@@ -782,30 +999,41 @@ function renderSuggestions() {
 }
 
 async function resolveSuggestion(sid, action) {
-  setStatus('dirty', action === 'accept' ? 'Accepting…' : 'Rejecting…');
+  const verb = action === 'accept' ? 'accept' : 'resolve'; // UI calls reject "Resolve"
+  setStatus('dirty', action === 'accept' ? 'Accepting…' : 'Resolving…');
   try {
     const res = await fetch(`/api/suggest/${encodeURIComponent(docId)}/${encodeURIComponent(sid)}/${action}`, { method: 'POST' });
-    // A span-level accept whose phrase no longer exists (block edited since) is
-    // marked stale server-side and NOT applied — surface that instead of failing.
-    if (res.status === 409) {
-      const err = await res.json().catch(() => ({}));
-      if (err.error === 'span_stale') {
-        setStatus('error', 'The highlighted phrase changed — suggestion is now stale, not applied.');
-        await loadSuggestions();
-        return;
+    if (res.ok) {
+      if (action === 'accept') {
+        const { overlay } = await res.json();
+        await boot(overlay);        // re-render with the accepted text applied
+        loadVersions();
       }
-      throw new Error();
+      setStatus('saved', action === 'accept' ? 'Accepted' : 'Resolved');
+      await loadSuggestions();
+      return;
     }
-    if (!res.ok) throw new Error();
-    if (action === 'accept') {
-      const { overlay } = await res.json();
-      await boot(overlay);        // re-render with the accepted text applied
-      loadVersions();
+    // Non-OK: give an honest, specific reason instead of a dead-end "Could not…".
+    const err = await res.json().catch(() => ({}));
+    if (res.status === 409 && err.error === 'span_stale') {
+      setStatus('error', 'The highlighted phrase changed — suggestion is now stale, not applied.');
+      await loadSuggestions();
+    } else if (res.status === 409) {
+      // Already handled (someone else, or a double-click) — refresh so it drops off.
+      setStatus('saved', 'Already resolved');
+      await loadSuggestions();
+    } else if (res.status === 403) {
+      // Only the doc owner can accept/resolve; a guest reviewer cannot.
+      setStatus('error', 'Only the document owner can accept or resolve suggestions.');
+    } else if (res.status === 404) {
+      setStatus('error', 'That suggestion no longer exists.');
+      await loadSuggestions();
+    } else {
+      setStatus('error', `Couldn’t ${verb} this suggestion.`);
     }
-    setStatus('saved', action === 'accept' ? 'Accepted' : 'Rejected');
-    await loadSuggestions();
   } catch {
-    setStatus('error', `Could not ${action}`);
+    // Network/transport failure (not an HTTP status) — genuinely try-again.
+    setStatus('error', `Couldn’t ${verb} — check your connection and try again.`);
   }
 }
 
@@ -993,6 +1221,13 @@ async function boot(overlayOverride) {
     data = await res.json();
     data.overlay = overlayOverride;
   }
+  // Capture link-access state from the doc payload (drives which modes are offered
+  // and whether the owner sees the access picker). Missing fields (older server)
+  // fall back to the permissive default so behavior is unchanged.
+  access = typeof data.access === 'string' ? data.access : 'suggest';
+  isDocOwner = data.isDocOwner === true;
+  canEdit = data.canEdit !== false;
+  canSuggest = data.canSuggest !== false;
   // Interactive (JS) doc -> sandboxed-iframe path (skips the inline pipeline).
   if (data.hasRaw) return bootInteractive(data);
   renderBaseHtml(data.baseHtml);
@@ -1019,6 +1254,10 @@ async function boot(overlayOverride) {
   // diffs can show "original words -> edit" for the very first change to a block.
   baseText = new Map();
   for (const [anchor, el] of anchorMap) baseText.set(anchor, isGroup(el) ? readGroupText(el) : el.textContent);
+  // Keep the last-saved overlay for the static path too (bootInteractive sets its
+  // own). revertBlockToSaved uses it to roll a refused edit back to the stored
+  // value rather than the original template text.
+  currentOverlay = data.overlay || {};
   const stale = applyOverlay(data.overlay);
   setEditable(editMode);
   // Combine asset + stale + unreachable-text warnings into one banner line.
@@ -1206,6 +1445,14 @@ async function main() {
   $('#hs-docname').textContent = docId;
   setStatus('', 'Loading…');
 
+  // Who are we? Owner (doc author) vs. reviewer (anyone with the link). Drives the
+  // display name stamped on suggestions so the owner can see WHO proposed a change.
+  try {
+    const who = await fetch('/api/whoami').then((r) => r.json());
+    isOwner = !!who.isOwner;
+  } catch { isOwner = false; }
+  myName = reviewerName(isOwner);
+
   const ok = await boot();
   if (!ok) return;
   wireEditing();
@@ -1214,25 +1461,47 @@ async function main() {
   $('#hs-suggest-ic').innerHTML = icon('message', { size: 15 });
   $('#hs-history-ic').innerHTML = icon('clock', { size: 15 });
   $('#hs-download-ic').innerHTML = icon('download', { size: 15 });
-  const modeIcon = $('#hs-mode-icon');
-  const modeIconName = () => (mode === 'suggest' ? 'message' : mode === 'use' ? 'cursor' : 'pencil');
-  const paintModeIcon = () => { modeIcon.innerHTML = icon(modeIconName(), { size: 15 }); };
+  $('#hs-share-ic').innerHTML = icon('link', { size: 15 });
 
-  // Mode selector (Editing / Suggesting / Using), like Google Docs' mode switch.
+  // Mode pill (Editing / Suggesting / Using), Google-Docs-style segmented control.
   // "Using" is only meaningful for interactive docs (it lets their own links/tabs/
   // buttons work by disabling our contenteditable), so reveal it only for those.
-  const modeSel = $('#hs-mode');
+  const modeOpts = Array.from(document.querySelectorAll('.hs-mode-opt'));
+  const modeIconName = (m) => (m === 'suggest' ? 'message' : m === 'use' ? 'cursor' : 'pencil');
+  for (const btn of modeOpts) {
+    btn.querySelector('.hs-mode-ic').innerHTML = icon(modeIconName(btn.dataset.mode), { size: 14 });
+  }
   const useOpt = $('#hs-mode-use');
   if (useOpt && interactive) useOpt.hidden = false;
-  mode = modeSel.value || 'edit';
-  applyMode();
-  paintModeIcon();
-  modeSel.addEventListener('change', () => {
-    mode = modeSel.value;
+  // Link access gates which modes a caller may use: hide Editing unless canEdit,
+  // hide Suggesting unless canSuggest. "Using" (interactive-only, read-only nav)
+  // stays available so a view-only guest can still operate an interactive doc's
+  // own controls. A guest on a view-only doc lands in the safe default below.
+  const editOpt = modeOpts.find((b) => b.dataset.mode === 'edit');
+  const suggestOpt = modeOpts.find((b) => b.dataset.mode === 'suggest');
+  if (editOpt) editOpt.hidden = !canEdit;
+  if (suggestOpt) suggestOpt.hidden = !canSuggest;
+  function selectMode(next) {
+    mode = next;
+    for (const btn of modeOpts) btn.setAttribute('aria-selected', String(btn.dataset.mode === next));
     applyMode();
-    paintModeIcon();
-    if (mode === 'suggest') { document.body.classList.add('hs-show-suggest'); loadSuggestions(); }
-  });
+    // The suggestions panel opens with Suggesting mode and closes when you leave it
+    // (the standalone Suggestions button can still reopen it in any mode).
+    document.body.classList.toggle('hs-show-suggest', mode === 'suggest');
+    if (mode === 'suggest') loadSuggestions();
+  }
+  for (const btn of modeOpts) {
+    btn.addEventListener('click', () => { if (!btn.hidden) selectMode(btn.dataset.mode); });
+  }
+  // Default to the most capable mode the caller is allowed: edit → suggest → use,
+  // and finally a pure-read 'view' for a view-only static doc (so the pill doesn't
+  // falsely show "Suggesting" when suggesting is disallowed).
+  const defaultMode = canEdit ? 'edit' : canSuggest ? 'suggest' : (interactive ? 'use' : 'view');
+  selectMode(defaultMode);
+
+  // Share opens a popover (Google-Docs style) holding the copyable link and, for
+  // the owner, the "Anyone with the link can…" access control.
+  wireShare();
 
   $('#hs-history-btn').addEventListener('click', () => {
     document.body.classList.toggle('hs-show-history');
@@ -1243,6 +1512,18 @@ async function main() {
     if (document.body.classList.contains('hs-show-suggest')) loadSuggestions();
   });
   $('#hs-download-btn').addEventListener('click', downloadHtml);
+
+  // Identity chip: shows who your suggestions will be attributed to. Owners see a
+  // fixed "Owner"; reviewers see their auto-assigned "Anonymous <Animal>" and can
+  // rename themselves (Google-Docs style). Rename persists locally, not server-side.
+  paintIdentityChip();
+  $('#hs-whoami')?.addEventListener('click', () => {
+    if (isOwner) return; // owner identity isn't editable
+    const next = prompt('Your name on suggestions (leave blank for the auto name):', myName);
+    if (next === null) return; // cancelled
+    myName = setReviewerName(next);
+    paintIdentityChip();
+  });
 
   // Dismiss the suggest popup / span bar / download menu on outside click / Escape.
   document.addEventListener('click', (e) => {
