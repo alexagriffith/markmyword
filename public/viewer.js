@@ -791,7 +791,9 @@ function paintIdentityChip() {
   // Small avatar: show just the first letter; the full name lives in the tooltip.
   // (The name still stamps suggestions via myName; this is only the toolbar chip.)
   const name = myName || 'Anonymous';
-  const initial = escapeHtml(name.trim().charAt(0) || '?');
+  // Use the first CODE POINT, not charAt(0): an emoji/multibyte first char is a
+  // surrogate pair, and charAt(0) would grab half of it and render a broken "�".
+  const initial = escapeHtml([...name.trim()][0] || '?');
   chip.innerHTML = `<span class="hs-who-label">${initial}</span>`;
   chip.classList.toggle('hs-who-owner', isOwner);
   chip.title = isOwner
