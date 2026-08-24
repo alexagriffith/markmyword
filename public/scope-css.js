@@ -26,7 +26,19 @@ function splitTopLevel(selectorText) {
   let depth = 0, quote = '', start = 0;
   for (let i = 0; i < selectorText.length; i++) {
     const c = selectorText[i];
-    if (quote) { if (c === quote && selectorText[i - 1] !== '\\') quote = ''; continue; }
+    if (quote) {
+      // Close the quote only if this quote char isn't escaped. A backslash escapes
+      // the next char, so an ODD run of preceding backslashes means escaped; EVEN
+      // (incl. zero) means the quote really closes. A single-char lookback would
+      // wrongly treat `[attr='\\']` (a literal backslash value) as still-open and
+      // let the string state bleed past the next comma, dropping a selector.
+      if (c === quote) {
+        let bs = 0;
+        for (let j = i - 1; j >= 0 && selectorText[j] === '\\'; j--) bs++;
+        if (bs % 2 === 0) quote = '';
+      }
+      continue;
+    }
     if (c === '"' || c === "'") quote = c;
     else if (c === '(' || c === '[') depth++;
     else if (c === ')' || c === ']') depth = Math.max(0, depth - 1);

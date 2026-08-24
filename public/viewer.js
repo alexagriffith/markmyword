@@ -34,6 +34,8 @@ let commentMap = new Map();         // comment anchor -> element (non-text, comm
 let baseText = new Map();            // anchor -> ORIGINAL template text (pre-overlay)
 const pending = new Map();          // anchor -> latest text awaiting save
 const saveTimers = new Map();
+const saveRetries = new Map();      // anchor -> consecutive transient-failure count
+const SAVE_MAX_RETRIES = 6;         // ~15s of 2.5s backoff before we stop and warn
 let inflight = 0;
 let suggestions = [];               // open suggestions for this doc
 let pollTimer = null;
@@ -285,6 +287,7 @@ async function saveBlock(anchor) {
       body: JSON.stringify({ anchor, text }),
     });
     if (res.ok) {
+      saveRetries.delete(anchor); // clean success resets the transient-failure count
       // This call still counts toward inflight until the finally below, so "last
       // one out" is inflight === 1 here, not 0.
       if (inflight === 1 && pending.size === 0) setStatus('saved', 'All changes saved');
@@ -301,18 +304,31 @@ async function saveBlock(anchor) {
         // The most common case: a guest on a doc they can't directly edit. Point
         // them at Suggesting (which they usually CAN do) instead of a dead retry.
         setStatus('error', "You don't have edit access — switch to Suggesting to propose changes.");
-        if (canSuggest) revertBlockToSaved(anchor);
       } else {
         setStatus('error', `Couldn’t save this change (${why || res.status}).`);
       }
+      // Any 4xx means this edit will NEVER be stored: roll the block back to its
+      // last saved text so the doc doesn't keep showing an edit that vanishes on
+      // reload (misleading the reviewer into thinking it saved).
+      revertBlockToSaved(anchor);
+      saveRetries.delete(anchor);
       return; // do NOT re-queue: the retry can never succeed
     }
     // 5xx / network-shaped failure: genuinely transient — bounded retry.
     throw new Error(`save ${res.status}`);
   } catch {
-    setStatus('error', 'Save failed — retrying');
+    // Bounded retry: a persistent 5xx/offline must not spin forever (the same
+    // failure class as the original 4xx loop). Give up after SAVE_MAX_RETRIES and
+    // keep the text pending so a later successful edit to the block still flushes.
+    const tries = (saveRetries.get(anchor) || 0) + 1;
+    saveRetries.set(anchor, tries);
     pending.set(anchor, text);
-    setTimeout(() => saveBlock(anchor), 2500);
+    if (tries <= SAVE_MAX_RETRIES) {
+      setStatus('error', 'Save failed — retrying');
+      setTimeout(() => saveBlock(anchor), 2500);
+    } else {
+      setStatus('error', 'Save keeps failing — your change is unsaved. Check your connection.');
+    }
   } finally {
     inflight--;
   }
@@ -1238,6 +1254,10 @@ async function boot(overlayOverride) {
   // diffs can show "original words -> edit" for the very first change to a block.
   baseText = new Map();
   for (const [anchor, el] of anchorMap) baseText.set(anchor, isGroup(el) ? readGroupText(el) : el.textContent);
+  // Keep the last-saved overlay for the static path too (bootInteractive sets its
+  // own). revertBlockToSaved uses it to roll a refused edit back to the stored
+  // value rather than the original template text.
+  currentOverlay = data.overlay || {};
   const stale = applyOverlay(data.overlay);
   setEditable(editMode);
   // Combine asset + stale + unreachable-text warnings into one banner line.
