@@ -15,13 +15,33 @@
 
 export const DOC_SCOPE = '#hs-doc-root';
 
+// Split a selector list on TOP-LEVEL commas only. A functional pseudo-class such
+// as `:is(h1, h2)`, `:not(.a, .b)`, `:has(> a, > b)` or `:nth-child(2n of .x, .y)`
+// contains commas that are NOT list separators — naively splitting on every comma
+// shreds those selectors into invalid fragments, and the browser drops the rule
+// (the doc silently loses those styles). So we track (), [] and string nesting
+// and only break at depth 0.
+function splitTopLevel(selectorText) {
+  const parts = [];
+  let depth = 0, quote = '', start = 0;
+  for (let i = 0; i < selectorText.length; i++) {
+    const c = selectorText[i];
+    if (quote) { if (c === quote && selectorText[i - 1] !== '\\') quote = ''; continue; }
+    if (c === '"' || c === "'") quote = c;
+    else if (c === '(' || c === '[') depth++;
+    else if (c === ')' || c === ']') depth = Math.max(0, depth - 1);
+    else if (c === ',' && depth === 0) { parts.push(selectorText.slice(start, i)); start = i + 1; }
+  }
+  parts.push(selectorText.slice(start));
+  return parts;
+}
+
 // Rewrite one comma-separated selector list so each selector is confined to the
 // container. A leading page-root token (html/body/:root, with optional qualifier
 // like `body.dark`) becomes the container; any other selector is prefixed with
 // the container as an ancestor.
 export function scopeSelector(selectorText, scope = DOC_SCOPE) {
-  return selectorText
-    .split(',')
+  return splitTopLevel(selectorText)
     .map((sel) => {
       const s = sel.trim();
       if (!s) return s;
@@ -47,7 +67,16 @@ export function scopeCssRules(rules, scope = DOC_SCOPE) {
         out += `@media ${rule.media.mediaText} {\n${scopeCssRules(rule.cssRules, scope)}}\n`;
       } else if (rule.type === CSSRule.SUPPORTS_RULE) {
         out += `@supports ${rule.conditionText} {\n${scopeCssRules(rule.cssRules, scope)}}\n`;
+      } else if (rule.cssRules && rule.cssRules.length && /^@(layer|container|scope)\b/i.test(rule.cssText)) {
+        // @layer { … }, @container … { … }, @scope { … } are grouping rules that
+        // hold nested style rules (which can target body/h1 and thus escape). The
+        // CSSRule.*_RULE constants for these are newer/inconsistent across engines,
+        // so we detect by prelude and recurse, re-emitting the prelude verbatim.
+        const prelude = rule.cssText.slice(0, rule.cssText.indexOf('{')).trim();
+        out += `${prelude} {\n${scopeCssRules(rule.cssRules, scope)}}\n`;
       } else {
+        // @keyframes, @font-face, @import, bare @layer statements, etc. don't
+        // select page elements, so they can't hijack the chrome — pass through.
         out += `${rule.cssText}\n`;
       }
     } catch {

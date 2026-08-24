@@ -28,6 +28,18 @@ ok(scopeSelector('body > .x') === `${DOC_SCOPE} > .x`, 'child combinator after b
 // A selector that merely CONTAINS "body" as a class/id must not be treated as the tag.
 ok(scopeSelector('.body-copy') === `${DOC_SCOPE} .body-copy`, '.body-copy is not the body tag');
 
+// H2 regression: commas INSIDE :is()/:not()/:has()/nth-child(... of ...) are not
+// list separators — splitting on them shreds the selector and the browser drops
+// the rule (doc silently loses those styles).
+ok(scopeSelector('.foo:is(h1, h2)') === `${DOC_SCOPE} .foo:is(h1, h2)`,
+   ':is(h1, h2) is kept intact (not split on its inner comma)');
+ok(scopeSelector('a:not(.x, .y), b') === `${DOC_SCOPE} a:not(.x, .y), ${DOC_SCOPE} b`,
+   'top-level comma splits but :not() inner comma does not');
+ok(scopeSelector(':is(h1, h2) span') === `${DOC_SCOPE} :is(h1, h2) span`,
+   'leading :is() with descendant is scoped as one unit');
+ok(scopeSelector("[data-x='a,b']") === `${DOC_SCOPE} [data-x='a,b']`,
+   'comma inside a quoted attribute value is not a separator');
+
 // --- scopeCssText: full stylesheet, the real bug ------------------------------
 const leaky = 'body { max-width: 620px; margin: 48px auto; } h1 { color: red; } .stat { font-weight: 700; }';
 const scoped = scopeCssText(leaky, dom.window.document);

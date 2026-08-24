@@ -284,15 +284,51 @@ async function saveBlock(anchor) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ anchor, text }),
     });
-    if (!res.ok) throw new Error(`save ${res.status}`);
-    inflight--;
-    if (inflight === 0 && pending.size === 0) setStatus('saved', 'All changes saved');
+    if (res.ok) {
+      // This call still counts toward inflight until the finally below, so "last
+      // one out" is inflight === 1 here, not 0.
+      if (inflight === 1 && pending.size === 0) setStatus('saved', 'All changes saved');
+      return;
+    }
+    // A 4xx is a PERMANENT refusal (not permitted, bad request), not a blip:
+    // retrying it just spins forever — the "Saving→Failing→Saving→Failing" loop
+    // that silently throws the edit away on reload. Stop, and say so honestly so
+    // the reviewer isn't left thinking their work was saved.
+    if (res.status >= 400 && res.status < 500) {
+      let why = '';
+      try { why = (await res.json())?.error || ''; } catch {}
+      if (res.status === 403 || why === 'edit_not_allowed' || why === 'not_your_doc') {
+        // The most common case: a guest on a doc they can't directly edit. Point
+        // them at Suggesting (which they usually CAN do) instead of a dead retry.
+        setStatus('error', "You don't have edit access — switch to Suggesting to propose changes.");
+        if (canSuggest) revertBlockToSaved(anchor);
+      } else {
+        setStatus('error', `Couldn’t save this change (${why || res.status}).`);
+      }
+      return; // do NOT re-queue: the retry can never succeed
+    }
+    // 5xx / network-shaped failure: genuinely transient — bounded retry.
+    throw new Error(`save ${res.status}`);
   } catch {
-    inflight--;
     setStatus('error', 'Save failed — retrying');
     pending.set(anchor, text);
     setTimeout(() => saveBlock(anchor), 2500);
+  } finally {
+    inflight--;
   }
+}
+
+// Roll a block's on-screen text back to the last server-confirmed value after a
+// refused edit, so the doc doesn't keep showing an edit that was never stored
+// (which would vanish on reload and confuse the reviewer).
+function revertBlockToSaved(anchor) {
+  const el = anchorMap.get(anchor);
+  if (!el) return;
+  const saved = currentOverlay?.[anchor]?.text;
+  const text = typeof saved === 'string' ? decodeEntities(saved) : baseText.get(anchor);
+  if (typeof text !== 'string') return;
+  if (isGroup(el)) writeGroupText(el, text);
+  else el.textContent = text;
 }
 
 // IMPORTANT: editing text changes the element's textContent, which would change
@@ -947,30 +983,41 @@ function renderSuggestions() {
 }
 
 async function resolveSuggestion(sid, action) {
-  setStatus('dirty', action === 'accept' ? 'Accepting…' : 'Rejecting…');
+  const verb = action === 'accept' ? 'accept' : 'resolve'; // UI calls reject "Resolve"
+  setStatus('dirty', action === 'accept' ? 'Accepting…' : 'Resolving…');
   try {
     const res = await fetch(`/api/suggest/${encodeURIComponent(docId)}/${encodeURIComponent(sid)}/${action}`, { method: 'POST' });
-    // A span-level accept whose phrase no longer exists (block edited since) is
-    // marked stale server-side and NOT applied — surface that instead of failing.
-    if (res.status === 409) {
-      const err = await res.json().catch(() => ({}));
-      if (err.error === 'span_stale') {
-        setStatus('error', 'The highlighted phrase changed — suggestion is now stale, not applied.');
-        await loadSuggestions();
-        return;
+    if (res.ok) {
+      if (action === 'accept') {
+        const { overlay } = await res.json();
+        await boot(overlay);        // re-render with the accepted text applied
+        loadVersions();
       }
-      throw new Error();
+      setStatus('saved', action === 'accept' ? 'Accepted' : 'Resolved');
+      await loadSuggestions();
+      return;
     }
-    if (!res.ok) throw new Error();
-    if (action === 'accept') {
-      const { overlay } = await res.json();
-      await boot(overlay);        // re-render with the accepted text applied
-      loadVersions();
+    // Non-OK: give an honest, specific reason instead of a dead-end "Could not…".
+    const err = await res.json().catch(() => ({}));
+    if (res.status === 409 && err.error === 'span_stale') {
+      setStatus('error', 'The highlighted phrase changed — suggestion is now stale, not applied.');
+      await loadSuggestions();
+    } else if (res.status === 409) {
+      // Already handled (someone else, or a double-click) — refresh so it drops off.
+      setStatus('saved', 'Already resolved');
+      await loadSuggestions();
+    } else if (res.status === 403) {
+      // Only the doc owner can accept/resolve; a guest reviewer cannot.
+      setStatus('error', 'Only the document owner can accept or resolve suggestions.');
+    } else if (res.status === 404) {
+      setStatus('error', 'That suggestion no longer exists.');
+      await loadSuggestions();
+    } else {
+      setStatus('error', `Couldn’t ${verb} this suggestion.`);
     }
-    setStatus('saved', action === 'accept' ? 'Accepted' : 'Rejected');
-    await loadSuggestions();
   } catch {
-    setStatus('error', `Could not ${action}`);
+    // Network/transport failure (not an HTTP status) — genuinely try-again.
+    setStatus('error', `Couldn’t ${verb} — check your connection and try again.`);
   }
 }
 
@@ -1426,8 +1473,10 @@ async function main() {
   for (const btn of modeOpts) {
     btn.addEventListener('click', () => { if (!btn.hidden) selectMode(btn.dataset.mode); });
   }
-  // Default to the most capable mode the caller is allowed: edit → suggest → use.
-  const defaultMode = canEdit ? 'edit' : canSuggest ? 'suggest' : (interactive ? 'use' : 'suggest');
+  // Default to the most capable mode the caller is allowed: edit → suggest → use,
+  // and finally a pure-read 'view' for a view-only static doc (so the pill doesn't
+  // falsely show "Suggesting" when suggesting is disallowed).
+  const defaultMode = canEdit ? 'edit' : canSuggest ? 'suggest' : (interactive ? 'use' : 'view');
   selectMode(defaultMode);
 
   // Share opens a popover (Google-Docs style) holding the copyable link and, for

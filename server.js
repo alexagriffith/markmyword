@@ -561,9 +561,15 @@ export function createApp(db, opts = {}) {
   // --- suggestions (tracked changes; owner can suggest + accept/reject) ---
 
   // GET /api/suggestions/:id -> { suggestions: [...] }  (open only)
-  app.get('/api/suggestions/:id', readLimiter, (req, res) => {
+  app.get('/api/suggestions/:id', readLimiter, async (req, res) => {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
+    if (await readDocHtml(id) == null) return res.status(404).json({ error: 'doc_not_found' });
+    // A view-only link hides change requests from guests: if the owner locked the
+    // doc to 'view', a guest must not be able to read others' suggestions either
+    // (they can't make them, and the owner may have chosen 'view' precisely to
+    // keep a client from seeing pending edits). Owner/doc-owner always see them.
+    if (!canSuggestDoc(req, id)) return res.status(403).json({ error: 'view_only' });
     noStore(res);
     res.json({ suggestions: listSuggestions(db, id, 'open') });
   });
