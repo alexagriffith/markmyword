@@ -13,6 +13,7 @@ import {
   openDb, getOverlay, setBlockAndSnapshot, listVersions, getVersion, restoreVersion,
   listSuggestions, addSuggestion, getSuggestion, setSuggestionStatus, acceptSuggestion,
   setDocOwner, getDocOwner, countDocsOwnedBy, countGuestOwners, deleteDocData, ownerMap,
+  getDocAccess, setDocAccess, ACCESS_LEVELS,
 } from './db.js';
 import { makeGuardrails, LIMITS } from './guardrails.js';
 import { makeFeedbackHandler } from './feedback-api.js';
@@ -368,8 +369,45 @@ export function createApp(db, opts = {}) {
     const baseHtml = await readDocHtml(id);
     if (baseHtml == null) return res.status(404).json({ error: 'doc_not_found' });
     const config = await readDocConfig(id);
+    // access = the doc's link-access level; canEdit/canSuggest = what THIS caller
+    // may do given that level (the owner/doc-owner always can, a guest per level).
+    const access = getDocAccess(db, id);
+    const mine = ownsDoc(req, id);
     noStore(res);
-    res.json({ id, baseHtml, overlay: getOverlay(db, id), config, hasRaw: await docHasRaw(id) });
+    res.json({
+      id, baseHtml, overlay: getOverlay(db, id), config, hasRaw: await docHasRaw(id),
+      access, isDocOwner: mine,
+      canEdit: mine || access === 'edit',
+      canSuggest: mine || access !== 'view',
+    });
+  });
+
+  // GET /api/access/:id -> { access, isDocOwner }   PUT { level } -> { ok, access }
+  // The link-access level (view/suggest/edit) is the owner's control over what a
+  // guest with the link may do. Reading it is open (the viewer needs it to render
+  // the right modes); changing it is restricted to the owner / the doc's owner.
+  app.get('/api/access/:id', readLimiter, async (req, res) => {
+    const { id } = req.params;
+    if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
+    if (await readDocHtml(id) == null) return res.status(404).json({ error: 'doc_not_found' });
+    noStore(res);
+    res.json({ access: getDocAccess(db, id), isDocOwner: ownsDoc(req, id) });
+  });
+
+  app.put('/api/access/:id', writeLimiter, async (req, res) => {
+    const { id } = req.params;
+    if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
+    if (await readDocHtml(id) == null) return res.status(404).json({ error: 'doc_not_found' });
+    if (!ownsDoc(req, id)) return res.status(403).json({ error: 'not_your_doc' });
+    const level = String(req.body?.level || '');
+    if (!ACCESS_LEVELS.includes(level)) return res.status(400).json({ error: 'invalid_access_level' });
+    // A doc with no owner row (seed/demo) can't carry a per-doc level. Only the
+    // global owner reaches here for those (ownsDoc → isOwner), so record ownership
+    // under the shared 'owner' token first, then set the level.
+    if (getDocOwner(db, id) == null) setDocOwner(db, id, 'owner', new Date().toISOString());
+    setDocAccess(db, id, level);
+    noStore(res);
+    res.json({ ok: true, access: level });
   });
 
   // GET /api/raw/:id -> the un-stripped ORIGINAL bytes of an interactive doc, as
@@ -457,12 +495,25 @@ export function createApp(db, opts = {}) {
     return owner != null && owner === req.caller?.token;
   }
 
+  // May THIS caller directly edit the doc's text? The owner/doc-owner always may;
+  // a plain guest may only when the doc's link-access level is 'edit'.
+  function canEditDoc(req, id) {
+    return ownsDoc(req, id) || getDocAccess(db, id) === 'edit';
+  }
+
+  // May THIS caller propose suggestions? Everyone except a guest on a 'view'-only
+  // doc (the owner/doc-owner is never blocked).
+  function canSuggestDoc(req, id) {
+    return ownsDoc(req, id) || getDocAccess(db, id) !== 'view';
+  }
+
   // POST /api/edit/:id { anchor, text } -> { ok, overlay }
   app.post('/api/edit/:id', writeLimiter, async (req, res) => {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     if (await readDocHtml(id) == null) return res.status(404).json({ error: 'doc_not_found' });
-    if (!ownsDoc(req, id)) return res.status(403).json({ error: 'not_your_doc' });
+    // Direct editing: the owner/doc-owner always, or a guest when access === 'edit'.
+    if (!canEditDoc(req, id)) return res.status(403).json({ error: 'edit_not_allowed' });
     const { anchor, text } = req.body || {};
     if (typeof anchor !== 'string' || !anchor || anchor.length > 200) {
       return res.status(400).json({ error: 'invalid_anchor' });
@@ -522,6 +573,8 @@ export function createApp(db, opts = {}) {
     const { id } = req.params;
     if (!isValidDocId(id)) return res.status(400).json({ error: 'invalid_doc_id' });
     if (await readDocHtml(id) == null) return res.status(404).json({ error: 'doc_not_found' });
+    // Suggesting is open to any reviewer EXCEPT on a view-only doc (owner's choice).
+    if (!canSuggestDoc(req, id)) return res.status(403).json({ error: 'suggest_not_allowed' });
     const { anchor, quote, body, kind, author, spanOcc, baseText } = req.body || {};
     if (kind !== 'rewrite' && kind !== 'comment') return res.status(400).json({ error: 'invalid_kind' });
     // A multi-block anchor ("m:a1,a2,…") packs several block anchors, so it needs a
